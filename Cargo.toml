@@ -1,0 +1,75 @@
+[package]
+name = "payload-extract"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Android OTA payload.bin extractor"
+license = "GPL-2.0"
+keywords = ["android", "ota", "payload", "extraction"]
+categories = ["command-line-utilities", "compression"]
+
+[[bin]]
+name = "payload-extract"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", default-features = false, features = ["derive", "color", "wrap_help", "std", "help", "usage", "error-context", "suggestions"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Protobuf
+prost = "0.14"
+
+# Concurrency
+rayon = "1"
+
+# Memory-mapped I/O
+memmap2 = "0.9"
+
+# Compression
+zstd = { version = "0.13", default-features = false }
+xz2 = "0.1"
+bzip2 = "0.6"
+lz4_flex = { version = "0.13", default-features = false }
+
+# Binary diff (Android BSDF2 format support for BROTLI_BSDIFF)
+bsdiff-android = "0.0.2"
+
+# Hashing
+sha2 = { version = "0.11", default-features = false }
+
+# ZIP support
+zip = { version = "8", default-features = false }
+
+# Progress
+indicatif = { version = "0.18", default-features = false, features = ["rayon"] }
+
+# Utilities
+hex = { version = "0.4", default-features = false, features = ["std"] }
+num_cpus = "1"
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = "1"
+
+# Async HTTP (feature-gated)
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["stream"], optional = true }
+futures = { version = "0.3", default-features = false, features = ["std"], optional = true }
+
+[build-dependencies]
+prost-build = "0.14"
+
+[features]
+default = ["http-native-tls"]
+http = ["dep:tokio", "dep:reqwest", "dep:futures"]
+http-native-tls = ["http", "reqwest?/native-tls"]
+http-vendored-tls = ["http", "reqwest?/native-tls-vendored"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

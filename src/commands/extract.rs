@@ -1,0 +1,143 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use clap::Args;
+
+use crate::extract::{self, ExtractConfig};
+use crate::input;
+
+#[derive(Args)]
+pub struct ExtractArgs {
+    /// Path to payload.bin, OTA ZIP, or HTTP URL
+    pub input: String,
+
+    /// Output directory
+    #[arg(short, long, default_value = "output")]
+    pub output: PathBuf,
+
+    /// Comma-separated partition names to include (empty = all)
+    #[arg(short, long, value_delimiter = ',')]
+    pub partitions: Option<Vec<String>>,
+
+    /// Comma-separated partition names to exclude
+    #[arg(short = 'x', long, value_delimiter = ',')]
+    pub exclude: Option<Vec<String>>,
+
+    /// Source directory for delta/incremental OTA (old partition images)
+    #[arg(short, long)]
+    pub source_dir: Option<String>,
+
+    /// Output config file: one line per partition as `partition_name:/path/to/output`
+    #[arg(long)]
+    pub out_config: Option<PathBuf>,
+
+    /// Number of threads (0 = auto-detect)
+    #[arg(short = 'j', long, default_value = "0")]
+    pub threads: usize,
+
+    /// Verify SHA256 hash of each operation's data
+    #[arg(short, long)]
+    pub verify: bool,
+
+    /// Quiet mode (no progress bars)
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
+pub fn run(args: ExtractArgs, insecure: bool) -> Result<()> {
+    let start = Instant::now();
+
+    // Parse output config if provided
+    let out_config = if let Some(ref config_path) = args.out_config {
+        Some(parse_out_config(config_path)?)
+    } else {
+        None
+    };
+
+    // For HTTP URLs, we need to know partition names BEFORE opening
+    // so we can do selective range downloads
+    let pre_partition_names: Vec<String> = match (&args.partitions, &args.exclude) {
+        (Some(inc), _) => inc.clone(),
+        // For exclude mode or all, pass empty (handled after manifest parse)
+        _ => Vec::new(),
+    };
+
+    if !args.quiet {
+        eprintln!("Opening payload: {}", args.input);
+    }
+
+    let payload = input::open_for_extract(&args.input, &pre_partition_names, insecure)?;
+
+    if !args.quiet {
+        let partitions = payload.partitions();
+        eprintln!(
+            "Payload: version {}, block_size {}, {} partitions",
+            payload.header().version,
+            payload.block_size(),
+            partitions.len()
+        );
+    }
+
+    // Build final partition name list with include/exclude logic
+    let partition_names = build_partition_list(
+        &payload,
+        args.partitions.as_deref(),
+        args.exclude.as_deref(),
+    );
+
+    let config = ExtractConfig {
+        verify_ops: args.verify,
+        threads: args.threads,
+        quiet: args.quiet,
+        source_dir: args.source_dir,
+        out_config,
+    };
+
+    extract::extract_partitions(&payload, &args.output, &partition_names, &config)?;
+
+    if !args.quiet {
+        let elapsed = start.elapsed();
+        eprintln!("Extraction completed in {elapsed:.2?}");
+    }
+
+    Ok(())
+}
+
+/// Build partition name list with include/exclude filtering.
+fn build_partition_list(
+    payload: &crate::payload::PayloadView,
+    include: Option<&[String]>,
+    exclude: Option<&[String]>,
+) -> Vec<String> {
+    match (include, exclude) {
+        (Some(inc), _) => inc.to_vec(),
+        (None, Some(exc)) => payload
+            .partitions()
+            .iter()
+            .map(|p| &p.partition_name)
+            .filter(|name| !exc.iter().any(|e| e == *name))
+            .cloned()
+            .collect(),
+        (None, None) => Vec::new(), // empty = all
+    }
+}
+
+/// Parse output config file. Each line: `partition_name:/path/to/output`
+fn parse_out_config(path: &Path) -> Result<HashMap<String, PathBuf>> {
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+
+    let mut map = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((name, path_str)) = line.split_once(':') {
+            map.insert(name.trim().to_string(), PathBuf::from(path_str.trim()));
+        }
+    }
+    Ok(map)
+}
