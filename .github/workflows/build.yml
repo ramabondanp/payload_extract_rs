@@ -37,9 +37,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install protoc
-        run: choco install protoc -y
-
       - name: Cargo cache
         uses: actions/cache@v5
         with:
@@ -68,9 +65,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Install protoc
-        run: brew install protobuf
 
       - name: Cargo cache
         uses: actions/cache@v5
@@ -115,9 +109,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install protoc
-        run: sudo apt-get install -y protobuf-compiler
-
       - name: Cargo cache
         uses: actions/cache@v5
         with:
@@ -151,9 +142,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Install protoc
-        run: sudo apt-get install -y protobuf-compiler
 
       - name: Cargo cache
         uses: actions/cache@v5
