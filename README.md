@@ -57,6 +57,12 @@ payload-extract extract payload.bin -j 4
 # Delta/incremental OTA
 payload-extract extract delta_payload.bin --source-dir old_images/
 
+# Write back dm-verity hash tree and FEC after extraction
+payload-extract extract delta_payload.bin --source-dir old_images/ --verify-update
+
+# Only for specific partitions
+payload-extract extract delta_payload.bin --source-dir old_images/ --verify-update=system,vendor
+
 # Custom output paths
 payload-extract extract payload.bin --out-config paths.txt
 ```
@@ -158,6 +164,12 @@ payload-extract extract payload.bin -j 4
 
 # 增量 OTA
 payload-extract extract delta_payload.bin --source-dir old_images/
+
+# 提取后写回 dm-verity 哈希树和 FEC 数据
+payload-extract extract delta_payload.bin --source-dir old_images/ --verify-update
+
+# 仅对指定分区写回
+payload-extract extract delta_payload.bin --source-dir old_images/ --verify-update=system,vendor
 
 # 自定义输出路径
 payload-extract extract payload.bin --out-config paths.txt

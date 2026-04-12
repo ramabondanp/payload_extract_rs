@@ -1,8 +1,10 @@
 pub mod bufpool;
 pub mod decompress;
+pub mod fec;
 pub mod lz4diff;
 pub mod operation;
 pub mod verify;
+pub mod verify_update;
 pub mod writer;
 
 use std::collections::HashMap;
@@ -226,11 +228,9 @@ fn process_operation(
 ) -> Result<()> {
     match task.op_type {
         OpType::Zero | OpType::Discard => {
-            // Write zeros for all destination extents
-            // DISCARD semantics: data is undefined, we write zeros for consistency
-            for &(start_block, num_blocks) in &task.dst_extents {
-                writer.write_zeros(start_block, num_blocks)?;
-            }
+            // The output file is created via set_len() which guarantees zero-filled
+            // content on all major platforms (Linux ext4/btrfs, Windows NTFS, macOS APFS).
+            // Skipping explicit zero writes avoids redundant I/O.
         }
         OpType::Replace => {
             // Zero-copy: slice directly from mmap and pwrite to output
@@ -245,38 +245,49 @@ fn process_operation(
         OpType::SourceCopy => {
             let src = source_data
                 .ok_or_else(|| anyhow::anyhow!("SOURCE_COPY requires source partition data"))?;
-            let data = read_from_extents(src, &task.src_extents, block_size);
-            write_to_extents(&data, &task.dst_extents, writer, block_size)?;
+            bufpool::with_extent_buffer(
+                extents_byte_size(&task.src_extents, block_size) as usize,
+                |buf| {
+                    read_from_extents(src, &task.src_extents, block_size, buf);
+                    write_to_extents(buf, &task.dst_extents, writer, block_size)
+                },
+            )?;
         }
         OpType::SourceBsdiff => {
             // SOURCE_BSDIFF: BSDIFF40 format (bz2 compressed)
             let src = source_data
                 .ok_or_else(|| anyhow::anyhow!("SOURCE_BSDIFF requires source partition data"))?;
-            let src_data = read_from_extents(src, &task.src_extents, block_size);
-
             let blob = get_blob(payload, task)?;
             if config.verify_ops {
                 verify::verify_sha256(blob, &task.data_sha256)?;
             }
-
-            let patched = apply_bsdiff(&src_data, blob, "source_bsdiff")?;
-            write_to_extents(&patched, &task.dst_extents, writer, block_size)?;
+            bufpool::with_extent_buffer(
+                extents_byte_size(&task.src_extents, block_size) as usize,
+                |buf| {
+                    read_from_extents(src, &task.src_extents, block_size, buf);
+                    let patched = apply_bsdiff(buf, blob, "source_bsdiff")?;
+                    write_to_extents(&patched, &task.dst_extents, writer, block_size)
+                },
+            )?;
         }
         OpType::BrotliBsdiff => {
             // BROTLI_BSDIFF: BSDF2 format (brotli compressed streams)
             let src = source_data
                 .ok_or_else(|| anyhow::anyhow!("BROTLI_BSDIFF requires source partition data"))?;
-            let src_data = read_from_extents(src, &task.src_extents, block_size);
-
             let blob = get_blob(payload, task)?;
             if config.verify_ops {
                 verify::verify_sha256(blob, &task.data_sha256)?;
             }
-
-            let mut patched = Vec::new();
-            bsdiff_android::patch_bsdf2(&src_data, blob, &mut patched)
-                .map_err(|e| anyhow::anyhow!("BROTLI_BSDIFF patch failed: {e}"))?;
-            write_to_extents(&patched, &task.dst_extents, writer, block_size)?;
+            bufpool::with_extent_buffer(
+                extents_byte_size(&task.src_extents, block_size) as usize,
+                |buf| {
+                    read_from_extents(src, &task.src_extents, block_size, buf);
+                    let mut patched = Vec::new();
+                    bsdiff_android::patch_bsdf2(buf, blob, &mut patched)
+                        .map_err(|e| anyhow::anyhow!("BROTLI_BSDIFF patch failed: {e}"))?;
+                    write_to_extents(&patched, &task.dst_extents, writer, block_size)
+                },
+            )?;
         }
         OpType::Puffdiff => {
             bail!(
@@ -296,15 +307,18 @@ fn process_operation(
             let src = source_data.ok_or_else(|| {
                 anyhow::anyhow!("{:?} requires source partition data", task.op_type)
             })?;
-            let src_data = read_from_extents(src, &task.src_extents, block_size);
-
             let blob = get_blob(payload, task)?;
             if config.verify_ops {
                 verify::verify_sha256(blob, &task.data_sha256)?;
             }
-
-            let patched = lz4diff::apply_lz4diff(&src_data, blob, task.op_type)?;
-            write_to_extents(&patched, &task.dst_extents, writer, block_size)?;
+            bufpool::with_extent_buffer(
+                extents_byte_size(&task.src_extents, block_size) as usize,
+                |buf| {
+                    read_from_extents(src, &task.src_extents, block_size, buf);
+                    let patched = lz4diff::apply_lz4diff(buf, blob, task.op_type)?;
+                    write_to_extents(&patched, &task.dst_extents, writer, block_size)
+                },
+            )?;
         }
         OpType::ReplaceBz | OpType::ReplaceXz | OpType::ReplaceZstd => {
             // Compressed full-OTA operations: decompress then write
@@ -345,24 +359,30 @@ fn apply_bsdiff(old: &[u8], patch_data: &[u8], context: &str) -> Result<Vec<u8>>
     Ok(new)
 }
 
-/// Read data from source partition by extents.
-fn read_from_extents(source: &[u8], extents: &[(u64, u64)], block_size: u32) -> Vec<u8> {
-    let total_size: u64 = extents
+/// Calculate the total byte size of extents.
+fn extents_byte_size(extents: &[(u64, u64)], block_size: u32) -> u64 {
+    extents
         .iter()
         .map(|&(_, num_blocks)| num_blocks * block_size as u64)
-        .sum();
-    let mut data = Vec::with_capacity(total_size as usize);
+        .sum()
+}
+
+/// Read data from source partition by extents into a buffer.
+fn read_from_extents(source: &[u8], extents: &[(u64, u64)], block_size: u32, buf: &mut Vec<u8>) {
+    let total_size = extents_byte_size(extents, block_size) as usize;
+    buf.clear();
+    if buf.capacity() < total_size {
+        buf.reserve(total_size - buf.capacity());
+    }
 
     for &(start_block, num_blocks) in extents {
         let offset = (start_block * block_size as u64) as usize;
         let len = (num_blocks * block_size as u64) as usize;
         let end = (offset + len).min(source.len());
         if offset < source.len() {
-            data.extend_from_slice(&source[offset..end]);
+            buf.extend_from_slice(&source[offset..end]);
         }
     }
-
-    data
 }
 
 /// Write decompressed data to non-contiguous destination extents.

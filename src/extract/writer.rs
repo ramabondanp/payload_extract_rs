@@ -53,22 +53,4 @@ impl PartitionWriter {
         }
         Ok(())
     }
-
-    /// Write zeros at a specific block range.
-    pub fn write_zeros(&self, start_block: u64, num_blocks: u64) -> Result<(), PayloadError> {
-        let offset = start_block * self.block_size;
-        let total = num_blocks * self.block_size;
-        // Write in 1MB chunks to avoid huge stack/heap allocation
-        const CHUNK_SIZE: usize = 1024 * 1024;
-        let zeros = vec![0u8; CHUNK_SIZE];
-        let mut remaining = total as usize;
-        let mut pos = offset;
-        while remaining > 0 {
-            let n = remaining.min(CHUNK_SIZE);
-            self.write_at(&zeros[..n], pos)?;
-            pos += n as u64;
-            remaining -= n;
-        }
-        Ok(())
-    }
 }

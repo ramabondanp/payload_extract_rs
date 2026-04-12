@@ -44,6 +44,11 @@ pub struct ExtractArgs {
     /// Quiet mode (no progress bars)
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Compute and write back dm-verity hash tree and FEC data after extraction.
+    /// Optionally specify comma-separated partition names to limit scope.
+    #[arg(long, value_delimiter = ',', num_args = 0.., require_equals = true, default_missing_value = "")]
+    pub verify_update: Option<Vec<String>>,
 }
 
 pub fn run(args: ExtractArgs, insecure: bool) -> Result<()> {
@@ -100,6 +105,45 @@ pub fn run(args: ExtractArgs, insecure: bool) -> Result<()> {
     if !args.quiet {
         let elapsed = start.elapsed();
         eprintln!("Extraction completed in {elapsed:.2?}");
+    }
+
+    // Run verify-update (hash tree + FEC write-back) if requested
+    if let Some(ref vu_targets) = args.verify_update {
+        let vu_start = Instant::now();
+
+        // Determine which partitions to verify-update
+        // Filter out empty strings from default_missing_value
+        let real_targets: Vec<String> = vu_targets
+            .iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect();
+        let vu_partitions: Vec<&crate::proto::PartitionUpdate> = if real_targets.is_empty() {
+            // --verify-update with no args: all extracted partitions
+            payload.selected_partitions(&partition_names)
+        } else {
+            payload.selected_partitions(&real_targets)
+        };
+
+        if !args.quiet {
+            eprintln!(
+                "Running verify-update for {} partitions...",
+                vu_partitions.len()
+            );
+        }
+
+        extract::verify_update::verify_update_partitions(
+            &vu_partitions,
+            &args.output,
+            payload.block_size(),
+            args.threads,
+            args.quiet,
+        )?;
+
+        if !args.quiet {
+            let elapsed = vu_start.elapsed();
+            eprintln!("Verify-update completed in {elapsed:.2?}");
+        }
     }
 
     Ok(())
