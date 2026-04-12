@@ -38,7 +38,7 @@ pub fn run(args: VerifyArgs, insecure: bool) -> Result<()> {
     let partition_names = args.partitions.unwrap_or_default();
     let partitions = payload.selected_partitions(&partition_names);
 
-    eprintln!("Verifying {} partitions...", partitions.len());
+    println!("Verifying {} partitions...", partitions.len());
 
     let results: Vec<(&str, bool)> = partitions
         .par_iter()
@@ -49,21 +49,21 @@ pub fn run(args: VerifyArgs, insecure: bool) -> Result<()> {
             let path = args.dir.join(format!("{}.img", p.partition_name));
 
             if !path.exists() {
-                eprintln!("  SKIP  {}: file not found", p.partition_name);
+                println!("  SKIP  {}: file not found", p.partition_name);
                 return Some((p.partition_name.as_str(), false));
             }
 
             // SHA256 partition verification
             match verify_partition(&path, hash, size) {
                 Ok(true) => {
-                    eprintln!("  OK    {}", p.partition_name);
+                    println!("  OK    {}", p.partition_name);
                 }
                 Ok(false) => {
-                    eprintln!("  FAIL  {} (SHA256 mismatch)", p.partition_name);
+                    println!("  FAIL  {} (SHA256 mismatch)", p.partition_name);
                     return Some((p.partition_name.as_str(), false));
                 }
                 Err(e) => {
-                    eprintln!("  ERR   {}: {e}", p.partition_name);
+                    println!("  ERR   {}: {e}", p.partition_name);
                     return Some((p.partition_name.as_str(), false));
                 }
             }
@@ -76,27 +76,27 @@ pub fn run(args: VerifyArgs, insecure: bool) -> Result<()> {
                 let file = match std::fs::File::open(&path) {
                     Ok(f) => f,
                     Err(e) => {
-                        eprintln!("  ERR   {} open: {e}", p.partition_name);
+                        println!("  ERR   {} open: {e}", p.partition_name);
                         return Some((p.partition_name.as_str(), false));
                     }
                 };
                 let mmap = match unsafe { memmap2::Mmap::map(&file) } {
                     Ok(m) => m,
                     Err(e) => {
-                        eprintln!("  ERR   {} mmap: {e}", p.partition_name);
+                        println!("  ERR   {} mmap: {e}", p.partition_name);
                         return Some((p.partition_name.as_str(), false));
                     }
                 };
 
                 if args.hash_tree && p.hash_tree_extent.is_some() {
                     match verify_hash_tree(&mmap, p, block_size) {
-                        Ok(true) => eprintln!("  OK    {} (hash tree)", p.partition_name),
+                        Ok(true) => println!("  OK    {} (hash tree)", p.partition_name),
                         Ok(false) => {
-                            eprintln!("  FAIL  {} (hash tree mismatch)", p.partition_name);
+                            println!("  FAIL  {} (hash tree mismatch)", p.partition_name);
                             return Some((p.partition_name.as_str(), false));
                         }
                         Err(e) => {
-                            eprintln!("  ERR   {} hash tree: {e}", p.partition_name);
+                            println!("  ERR   {} hash tree: {e}", p.partition_name);
                             return Some((p.partition_name.as_str(), false));
                         }
                     }
@@ -104,13 +104,13 @@ pub fn run(args: VerifyArgs, insecure: bool) -> Result<()> {
 
                 if args.fec && p.fec_extent.is_some() {
                     match verify_fec(&mmap, p, block_size) {
-                        Ok(true) => eprintln!("  OK    {} (FEC)", p.partition_name),
+                        Ok(true) => println!("  OK    {} (FEC)", p.partition_name),
                         Ok(false) => {
-                            eprintln!("  FAIL  {} (FEC check failed)", p.partition_name);
+                            println!("  FAIL  {} (FEC check failed)", p.partition_name);
                             return Some((p.partition_name.as_str(), false));
                         }
                         Err(e) => {
-                            eprintln!("  ERR   {} FEC: {e}", p.partition_name);
+                            println!("  ERR   {} FEC: {e}", p.partition_name);
                             return Some((p.partition_name.as_str(), false));
                         }
                     }
@@ -125,7 +125,7 @@ pub fn run(args: VerifyArgs, insecure: bool) -> Result<()> {
     let total = results.len();
     let elapsed = start.elapsed();
 
-    eprintln!("\n{passed}/{total} partitions verified in {elapsed:.2?}");
+    println!("\n{passed}/{total} partitions verified in {elapsed:.2?}");
 
     if passed != total {
         anyhow::bail!("verification failed for {} partition(s)", total - passed);
