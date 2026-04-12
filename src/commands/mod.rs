@@ -3,13 +3,23 @@ pub mod list;
 pub mod metadata;
 pub mod verify;
 
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Parser, Subcommand};
+
+const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Green.on_default().bold().underline())
+    .usage(AnsiColor::Green.on_default().bold())
+    .literal(AnsiColor::Cyan.on_default().bold())
+    .placeholder(AnsiColor::Cyan.on_default())
+    .valid(AnsiColor::Green.on_default())
+    .invalid(AnsiColor::Yellow.on_default());
 
 #[derive(Parser)]
 #[command(
     name = "payload-extract",
     version,
-    about = "Android OTA payload.bin extractor"
+    about = "Android OTA payload.bin extractor",
+    styles = STYLES
 )]
 pub struct Cli {
     #[command(subcommand)]

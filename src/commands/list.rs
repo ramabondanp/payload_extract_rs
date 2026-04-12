@@ -3,6 +3,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::input;
+use crate::style;
 
 #[derive(Args)]
 pub struct ListArgs {
@@ -53,47 +54,49 @@ pub fn run(args: ListArgs, insecure: bool) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&entries)?);
     } else if args.hash {
-        println!("{:<25} {:>12} {:>6}  SHA256", "PARTITION", "SIZE", "OPS");
-        println!("{}", "-".repeat(110));
+        println!(
+            "{:<25} {:>12} {:>6}  {}",
+            style::label().apply_to("PARTITION"),
+            style::label().apply_to("SIZE"),
+            style::label().apply_to("OPS"),
+            style::label().apply_to("SHA256")
+        );
+        println!("{}", style::dim().apply_to("-".repeat(110)));
         for entry in &entries {
             println!(
                 "{:<25} {:>12} {:>6}  {}",
-                entry.name,
-                format_size(entry.size),
+                style::bold().apply_to(&entry.name),
+                style::format_size(entry.size),
                 entry.operations,
                 entry.hash.as_deref().unwrap_or("-")
             );
         }
     } else {
-        println!("{:<25} {:>12} {:>6}", "PARTITION", "SIZE", "OPS");
-        println!("{}", "-".repeat(46));
+        println!(
+            "{:<25} {:>12} {:>6}",
+            style::label().apply_to("PARTITION"),
+            style::label().apply_to("SIZE"),
+            style::label().apply_to("OPS")
+        );
+        println!("{}", style::dim().apply_to("-".repeat(46)));
         for entry in &entries {
             println!(
                 "{:<25} {:>12} {:>6}",
-                entry.name,
-                format_size(entry.size),
+                style::bold().apply_to(&entry.name),
+                style::format_size(entry.size),
                 entry.operations
             );
         }
     }
-    println!("{}", "-".repeat(if args.hash { 110 } else { 46 }));
-    println!("Total: {} partitions", entries.len());
+    println!(
+        "{}",
+        style::dim().apply_to("-".repeat(if args.hash { 110 } else { 46 }))
+    );
+    println!(
+        "{} {} partitions",
+        style::label().apply_to("Total:"),
+        entries.len()
+    );
 
     Ok(())
-}
-
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }

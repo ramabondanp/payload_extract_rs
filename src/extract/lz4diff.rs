@@ -3,6 +3,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::proto::{CompressedBlockInfo, Lz4diffHeader, compression_algorithm};
+use crate::style;
 
 const LZ4DIFF_MAGIC: &[u8; 7] = b"LZ4DIFF";
 const LZ4DIFF_VERSION: u32 = 1;
@@ -254,8 +255,9 @@ fn compress_blob(
                     // use our raw compression output. This may produce slightly
                     // different output but is safer than applying a wrong patch.
                     eprintln!(
-                        "warning: LZ4DIFF postfix hash mismatch at offset {}, \
+                        "{} LZ4DIFF postfix hash mismatch at offset {}, \
                          skipping postfix patch (LZ4 implementation difference)",
+                        style::warning().apply_to("warning:"),
                         block.uncompressed_offset
                     );
                     output.extend_from_slice(&block_buf);

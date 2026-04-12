@@ -47,6 +47,9 @@ zip = { version = "8", default-features = false }
 # Progress
 indicatif = { version = "0.18", default-features = false, features = ["rayon"] }
 
+# Terminal styling
+console = "0.16"
+
 # Utilities
 hex = { version = "0.4", default-features = false, features = ["std"] }
 num_cpus = "1"

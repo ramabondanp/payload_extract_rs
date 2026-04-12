@@ -7,6 +7,7 @@ use prost::Message;
 use crate::payload::PayloadView;
 use crate::payload::header::{HEADER_SIZE, MAGIC, PayloadHeader};
 use crate::proto::DeltaArchiveManifest;
+use crate::style;
 
 use super::ZIP_MAGIC;
 const ZIP_EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
@@ -137,7 +138,11 @@ async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u6
         );
     }
 
-    eprintln!("Parsing remote ZIP ({})...", fmt(total_size));
+    eprintln!(
+        "{} ({})...",
+        style::label().apply_to("Parsing remote ZIP"),
+        style::format_size(total_size)
+    );
     let tail_size = (256 * 1024u64).min(total_size);
     let tail_offset = total_size - tail_size;
     let tail = range_download(client, url, tail_offset, tail_size).await?;
@@ -227,13 +232,17 @@ pub fn open_http_metadata(url: &str, insecure: bool) -> Result<PayloadView> {
         let client = build_client(insecure)?;
         let payload_off = detect_payload_offset(&client, url).await?;
 
-        eprintln!("Fetching payload header...");
+        eprintln!("{}...", style::label().apply_to("Fetching payload header"));
         let hdr = range_download(&client, url, payload_off, HEADER_SIZE as u64).await?;
         let header = PayloadHeader::parse(&hdr)?;
 
         let meta_len =
             HEADER_SIZE as u64 + header.manifest_size + header.metadata_signature_size as u64;
-        eprintln!("Fetching manifest ({})...", fmt(header.manifest_size));
+        eprintln!(
+            "{} ({})...",
+            style::label().apply_to("Fetching manifest"),
+            style::format_size(header.manifest_size)
+        );
         let meta = range_download(&client, url, payload_off, meta_len).await?;
 
         Ok(PayloadView::from_memory(meta, HashMap::new())?)
@@ -250,13 +259,17 @@ pub fn open_http_extract(
         let client = build_client(insecure)?;
         let payload_off = detect_payload_offset(&client, url).await?;
 
-        eprintln!("Fetching payload header...");
+        eprintln!("{}...", style::label().apply_to("Fetching payload header"));
         let hdr = range_download(&client, url, payload_off, HEADER_SIZE as u64).await?;
         let header = PayloadHeader::parse(&hdr)?;
 
         let meta_len =
             HEADER_SIZE as u64 + header.manifest_size + header.metadata_signature_size as u64;
-        eprintln!("Fetching manifest ({})...", fmt(header.manifest_size));
+        eprintln!(
+            "{} ({})...",
+            style::label().apply_to("Fetching manifest"),
+            style::format_size(header.manifest_size)
+        );
         let meta = range_download(&client, url, payload_off, meta_len).await?;
 
         let manifest = DeltaArchiveManifest::decode(
@@ -297,10 +310,9 @@ pub fn open_http_extract(
 
         let merged = merge_ranges(&op_ranges);
         let total_data: u64 = merged.iter().map(|r| r.1).sum();
-        eprintln!(
-            "Selective download: {} ({} range(s))",
-            fmt(total_data),
-            merged.len(),
+        style::log(
+            "Selective download",
+            format_args!("{} ({} range(s))", style::format_size(total_data), merged.len()),
         );
 
         use std::sync::Arc;
@@ -327,19 +339,24 @@ pub fn open_http_extract(
             }));
         }
 
+        let pb = indicatif::ProgressBar::new(total_data);
+        pb.set_style(
+            indicatif::ProgressStyle::with_template(
+                "{prefix:>20} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) [{elapsed_precise}]",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
+        pb.set_prefix("Downloading");
+
         let mut range_data: Vec<(u64, Vec<u8>)> = Vec::with_capacity(merged.len());
         for handle in handles {
             let (off, data) = handle.await??;
             let done = downloaded.load(Ordering::Relaxed);
-            eprint!(
-                "\rDownloading: {}/{} ({:.1}%)",
-                fmt(done),
-                fmt(total_data),
-                (done as f64 / total_data as f64) * 100.0,
-            );
+            pb.set_position(done);
             range_data.push((off, data));
         }
-        eprintln!();
+        pb.finish_and_clear();
 
         let mut buf = meta;
         let mut remap: HashMap<u64, (u64, u64)> = HashMap::new();
@@ -361,11 +378,14 @@ pub fn open_http_extract(
             }
         }
 
-        eprintln!(
-            "Buffer: {} (meta {} + data {})",
-            fmt(buf.len() as u64),
-            fmt(meta_len),
-            fmt(buf.len() as u64 - meta_len),
+        style::log(
+            "Buffer",
+            format_args!(
+                "{} (meta {} + data {})",
+                style::format_size(buf.len() as u64),
+                style::format_size(meta_len),
+                style::format_size(buf.len() as u64 - meta_len),
+            ),
         );
 
         Ok(PayloadView::from_memory(buf, remap)?)
@@ -391,19 +411,4 @@ fn merge_ranges(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
     }
     merged.push((cs, cl));
     merged
-}
-
-fn fmt(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }

@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::extract::fec::{self, FEC_RSM, RsEncoder};
 use crate::proto::PartitionUpdate;
+use crate::style;
 
 const SHA256_DIGEST_SIZE: usize = 32;
 
@@ -143,9 +144,9 @@ pub fn compute_and_write_hash_tree(
 
     // Compute root level (block_count == 1) and pop it from the write list,
     // matching the C++ reference which saves it for potential verification use.
-    let _root_level = levels.last().map(|last| {
-        compute_level(&last.data, last.total_hash_size, salt, block_size as usize)
-    });
+    let _root_level = levels
+        .last()
+        .map(|last| compute_level(&last.data, last.total_hash_size, salt, block_size as usize));
 
     // Arrange levels for write-back:
     // Reverse intermediate levels (deepest first), then append the top (leaf) level
@@ -315,7 +316,7 @@ pub fn verify_update_partitions(
 
                 if !output_path.exists() {
                     if !quiet {
-                        eprintln!("  SKIP  {name}: file not found");
+                        style::elog_skip(name, "file not found");
                     }
                     return Ok(());
                 }
@@ -323,14 +324,14 @@ pub fn verify_update_partitions(
                 // Hash tree
                 let ht_result = compute_and_write_hash_tree(partition, &output_path, block_size)?;
                 if ht_result && !quiet {
-                    eprintln!("  HASH  {name}");
+                    style::elog_ok("HASH", name);
                 }
 
                 // FEC (only if hash tree succeeded)
                 if ht_result {
                     let fec_result = compute_and_write_fec(partition, &output_path, block_size)?;
                     if fec_result && !quiet {
-                        eprintln!("  FEC   {name}");
+                        style::elog_ok("FEC", name);
                     }
                 }
 

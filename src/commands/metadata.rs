@@ -3,6 +3,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::input;
+use crate::style;
 
 #[derive(Args)]
 pub struct MetadataArgs {
@@ -105,45 +106,84 @@ pub fn run(args: MetadataArgs, insecure: bool) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&metadata)?);
     } else {
-        println!("Payload Metadata:");
-        println!("  Version:                  {}", metadata.version);
+        println!("{}", style::label().apply_to("Payload Metadata:"));
         println!(
-            "  Manifest size:            {} bytes",
+            "  {}                  {}",
+            style::label().apply_to("Version:"),
+            metadata.version
+        );
+        println!(
+            "  {}            {} bytes",
+            style::label().apply_to("Manifest size:"),
             metadata.manifest_size
         );
         println!(
-            "  Metadata signature size:  {} bytes",
+            "  {}  {} bytes",
+            style::label().apply_to("Metadata signature size:"),
             metadata.metadata_signature_size
         );
-        println!("  Block size:               {} bytes", metadata.block_size);
-        println!("  Partitions:               {}", metadata.partition_count);
+        println!(
+            "  {}               {} bytes",
+            style::label().apply_to("Block size:"),
+            metadata.block_size
+        );
+        println!(
+            "  {}               {}",
+            style::label().apply_to("Partitions:"),
+            metadata.partition_count
+        );
         if let Some(ts) = metadata.max_timestamp {
-            println!("  Max timestamp:            {ts}");
+            println!(
+                "  {}            {ts}",
+                style::label().apply_to("Max timestamp:")
+            );
         }
         if let Some(partial) = metadata.partial_update {
-            println!("  Partial update:           {partial}");
+            println!(
+                "  {}           {partial}",
+                style::label().apply_to("Partial update:")
+            );
         }
         if let Some(ref spl) = metadata.security_patch_level {
-            println!("  Security patch level:     {spl}");
+            println!(
+                "  {}     {spl}",
+                style::label().apply_to("Security patch level:")
+            );
         }
 
         if let Some(ref dyn_meta) = metadata.dynamic_partition_metadata {
-            println!("\nDynamic Partition Metadata:");
+            println!(
+                "\n{}",
+                style::label().apply_to("Dynamic Partition Metadata:")
+            );
             if let Some(snap) = dyn_meta.snapshot_enabled {
-                println!("  Snapshot enabled:         {snap}");
+                println!(
+                    "  {}         {snap}",
+                    style::label().apply_to("Snapshot enabled:")
+                );
             }
             if let Some(vabc) = dyn_meta.vabc_enabled {
-                println!("  VABC enabled:             {vabc}");
+                println!(
+                    "  {}             {vabc}",
+                    style::label().apply_to("VABC enabled:")
+                );
             }
             if let Some(ref param) = dyn_meta.vabc_compression_param {
-                println!("  VABC compression:         {param}");
+                println!(
+                    "  {}         {param}",
+                    style::label().apply_to("VABC compression:")
+                );
             }
             if let Some(cow) = dyn_meta.cow_version {
-                println!("  COW version:              {cow}");
+                println!(
+                    "  {}              {cow}",
+                    style::label().apply_to("COW version:")
+                );
             }
             for group in &dyn_meta.groups {
                 println!(
-                    "  Group '{}': size={}, partitions=[{}]",
+                    "  {} '{}': size={}, partitions=[{}]",
+                    style::label().apply_to("Group"),
                     group.name,
                     group
                         .size
@@ -155,13 +195,15 @@ pub fn run(args: MetadataArgs, insecure: bool) -> Result<()> {
         }
 
         if !metadata.apex_info.is_empty() {
-            println!("\nAPEX Info:");
+            println!("\n{}", style::label().apply_to("APEX Info:"));
             for apex in &metadata.apex_info {
                 println!(
-                    "  {} v{} compressed={} decompressed_size={}",
-                    apex.package_name.as_deref().unwrap_or("?"),
+                    "  {} v{} {}={} {}={}",
+                    style::bold().apply_to(apex.package_name.as_deref().unwrap_or("?")),
                     apex.version.unwrap_or(0),
+                    style::label().apply_to("compressed"),
                     apex.is_compressed.unwrap_or(false),
+                    style::label().apply_to("decompressed_size"),
                     apex.decompressed_size.unwrap_or(0)
                 );
             }

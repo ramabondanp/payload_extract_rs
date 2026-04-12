@@ -17,6 +17,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
 use crate::payload::PayloadView;
+use crate::style;
 
 use operation::{OpType, OperationTask};
 use writer::PartitionWriter;
@@ -85,11 +86,10 @@ pub fn extract_partitions(
 
     // Setup progress bars
     let multi_progress = MultiProgress::new();
-    let style = ProgressStyle::with_template(
-        "{prefix:>20} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) [{elapsed_precise}<{eta_precise}] {msg}",
-    )
-    .unwrap()
-    .progress_chars("=> ");
+    let style =
+        ProgressStyle::with_template("{prefix:>20} {msg:>10} [{bar:40.cyan/blue}] {percent:>3}%")
+            .unwrap()
+            .progress_chars("=> ");
 
     pool.install(|| {
         partitions
@@ -181,7 +181,8 @@ pub fn extract_partitions(
                 let pb = if !config.quiet {
                     let pb = multi_progress.add(ProgressBar::new(tasks.len() as u64));
                     pb.set_style(style.clone());
-                    pb.set_prefix(part_name.clone());
+                    pb.set_prefix(style::bold().apply_to(part_name).to_string());
+                    pb.set_message(style::format_size(part_size));
                     Some(pb)
                 } else {
                     None
@@ -209,7 +210,7 @@ pub fn extract_partitions(
                 })?;
 
                 if let Some(pb) = &pb {
-                    pb.finish_with_message("done");
+                    pb.finish();
                 }
 
                 Ok(())

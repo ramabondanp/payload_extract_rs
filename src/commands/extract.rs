@@ -7,6 +7,7 @@ use clap::Args;
 
 use crate::extract::{self, ExtractConfig};
 use crate::input;
+use crate::style;
 
 #[derive(Args)]
 pub struct ExtractArgs {
@@ -70,18 +71,21 @@ pub fn run(args: ExtractArgs, insecure: bool) -> Result<()> {
     };
 
     if !args.quiet {
-        eprintln!("Opening payload: {}", args.input);
+        style::log("Opening payload", &args.input);
     }
 
     let payload = input::open_for_extract(&args.input, &pre_partition_names, insecure)?;
 
     if !args.quiet {
         let partitions = payload.partitions();
-        eprintln!(
-            "Payload: version {}, block_size {}, {} partitions",
-            payload.header().version,
-            payload.block_size(),
-            partitions.len()
+        style::log(
+            "Payload",
+            format_args!(
+                "version {}, block_size {}, {} partitions",
+                payload.header().version,
+                payload.block_size(),
+                partitions.len()
+            ),
         );
     }
 
@@ -103,8 +107,7 @@ pub fn run(args: ExtractArgs, insecure: bool) -> Result<()> {
     extract::extract_partitions(&payload, &args.output, &partition_names, &config)?;
 
     if !args.quiet {
-        let elapsed = start.elapsed();
-        eprintln!("Extraction completed in {elapsed:.2?}");
+        style::log_done("Extraction completed in", start.elapsed());
     }
 
     // Run verify-update (hash tree + FEC write-back) if requested
@@ -126,9 +129,9 @@ pub fn run(args: ExtractArgs, insecure: bool) -> Result<()> {
         };
 
         if !args.quiet {
-            eprintln!(
-                "Running verify-update for {} partitions...",
-                vu_partitions.len()
+            style::log(
+                "Running verify-update for",
+                format_args!("{} partitions...", vu_partitions.len()),
             );
         }
 
@@ -141,8 +144,7 @@ pub fn run(args: ExtractArgs, insecure: bool) -> Result<()> {
         )?;
 
         if !args.quiet {
-            let elapsed = vu_start.elapsed();
-            eprintln!("Verify-update completed in {elapsed:.2?}");
+            style::log_done("Verify-update completed in", vu_start.elapsed());
         }
     }
 
