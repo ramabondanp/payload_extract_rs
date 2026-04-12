@@ -279,32 +279,18 @@ fn process_operation(
             write_to_extents(&patched, &task.dst_extents, writer, block_size)?;
         }
         OpType::Puffdiff => {
-            let src = source_data
-                .ok_or_else(|| anyhow::anyhow!("PUFFDIFF requires source partition data"))?;
-            let src_data = read_from_extents(src, &task.src_extents, block_size);
-
-            let blob = get_blob(payload, task)?;
-            if config.verify_ops {
-                verify::verify_sha256(blob, &task.data_sha256)?;
-            }
-
-            // Puffdiff uses bsdiff internally on "puffed" (inflated) data
-            let patched = apply_bsdiff(&src_data, blob, "puffdiff")?;
-            write_to_extents(&patched, &task.dst_extents, writer, block_size)?;
+            bail!(
+                "PUFFDIFF operations are not yet supported — \
+                 puffdiff uses the PUF1 patch format (puffin library), \
+                 which is not compatible with bsdiff"
+            );
         }
         OpType::Zucchini => {
-            let src = source_data
-                .ok_or_else(|| anyhow::anyhow!("ZUCCHINI requires source partition data"))?;
-            let src_data = read_from_extents(src, &task.src_extents, block_size);
-
-            let blob = get_blob(payload, task)?;
-            if config.verify_ops {
-                verify::verify_sha256(blob, &task.data_sha256)?;
-            }
-
-            // Zucchini uses bsdiff-compatible format
-            let patched = apply_bsdiff(&src_data, blob, "zucchini")?;
-            write_to_extents(&patched, &task.dst_extents, writer, block_size)?;
+            bail!(
+                "ZUCCHINI operations are not yet supported — \
+                 zucchini uses Chromium's custom binary diff format, \
+                 which is not compatible with bsdiff"
+            );
         }
         OpType::Lz4diffBsdiff | OpType::Lz4diffPuffdiff => {
             let src = source_data.ok_or_else(|| {

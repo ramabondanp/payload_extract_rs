@@ -28,9 +28,11 @@ pub fn decompress(op_type: OpType, input: &[u8], output: &mut Vec<u8>) -> Result
             Ok(())
         }
         OpType::ReplaceZstd => {
-            let decompressed = zstd::stream::decode_all(input)
+            let mut decoder = zstd::Decoder::new(input)
                 .map_err(|e| PayloadError::DecompressionFailed(format!("zstd: {e}")))?;
-            output.extend_from_slice(&decompressed);
+            decoder
+                .read_to_end(output)
+                .map_err(|e| PayloadError::DecompressionFailed(format!("zstd: {e}")))?;
             Ok(())
         }
         OpType::Zero => {

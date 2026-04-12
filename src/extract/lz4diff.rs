@@ -85,14 +85,21 @@ pub fn apply_lz4diff(
     )
     .context("LZ4DIFF source decompression failed")?;
 
-    // 3. Apply inner patch (both BSDIFF and PUFFDIFF use bsdiff-compatible format)
+    // 3. Apply inner patch
     let decompressed_dst = match op_type {
-        super::operation::OpType::Lz4diffBsdiff | super::operation::OpType::Lz4diffPuffdiff => {
+        super::operation::OpType::Lz4diffBsdiff => {
             let mut patch_reader = std::io::Cursor::new(inner_patch);
             let mut output = Vec::new();
             bsdiff_android::patch(&decompressed_src, &mut patch_reader, &mut output)
-                .context("LZ4DIFF inner patch failed")?;
+                .context("LZ4DIFF inner bsdiff patch failed")?;
             output
+        }
+        super::operation::OpType::Lz4diffPuffdiff => {
+            bail!(
+                "LZ4DIFF_PUFFDIFF operations are not yet supported — \
+                 the inner puffdiff patch uses the PUF1 format (puffin library), \
+                 which is not compatible with bsdiff"
+            );
         }
         _ => bail!("unexpected op_type in apply_lz4diff: {:?}", op_type),
     };
