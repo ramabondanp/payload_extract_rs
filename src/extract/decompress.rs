@@ -15,22 +15,21 @@ pub fn decompress(op_type: OpType, input: &[u8], output: &mut Vec<u8>) -> Result
         }
         OpType::ReplaceBz => {
             let mut decoder = bzip2::read::BzDecoder::new(input);
-            decoder.read_to_end(output).map_err(|e| {
-                PayloadError::DecompressionFailed(format!("bzip2: {e}"))
-            })?;
+            decoder
+                .read_to_end(output)
+                .map_err(|e| PayloadError::DecompressionFailed(format!("bzip2: {e}")))?;
             Ok(())
         }
         OpType::ReplaceXz => {
             let mut decoder = xz2::read::XzDecoder::new(input);
-            decoder.read_to_end(output).map_err(|e| {
-                PayloadError::DecompressionFailed(format!("xz: {e}"))
-            })?;
+            decoder
+                .read_to_end(output)
+                .map_err(|e| PayloadError::DecompressionFailed(format!("xz: {e}")))?;
             Ok(())
         }
         OpType::ReplaceZstd => {
-            let decompressed = zstd::stream::decode_all(input).map_err(|e| {
-                PayloadError::DecompressionFailed(format!("zstd: {e}"))
-            })?;
+            let decompressed = zstd::stream::decode_all(input)
+                .map_err(|e| PayloadError::DecompressionFailed(format!("zstd: {e}")))?;
             output.extend_from_slice(&decompressed);
             Ok(())
         }

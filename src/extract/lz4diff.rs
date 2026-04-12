@@ -42,15 +42,20 @@ pub fn apply_lz4diff(
         );
     }
 
-    let version =
-        u32::from_be_bytes(patch_data[VERSION_OFFSET..VERSION_OFFSET + 4].try_into().unwrap());
+    let version = u32::from_be_bytes(
+        patch_data[VERSION_OFFSET..VERSION_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
     if version != LZ4DIFF_VERSION {
         bail!("unsupported LZ4DIFF version: {version} (expected {LZ4DIFF_VERSION})");
     }
 
-    let pb_size =
-        u32::from_be_bytes(patch_data[PB_SIZE_OFFSET..PB_SIZE_OFFSET + 4].try_into().unwrap())
-            as usize;
+    let pb_size = u32::from_be_bytes(
+        patch_data[PB_SIZE_OFFSET..PB_SIZE_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
     let pb_end = PB_DATA_OFFSET + pb_size;
     if patch_data.len() < pb_end {
         bail!(
@@ -73,9 +78,12 @@ pub fn apply_lz4diff(
         .context("missing dst_info in LZ4DIFF header")?;
 
     // 2. Decompress source
-    let decompressed_src =
-        decompress_blob(src_data, &src_info.block_info, src_info.zero_padding_enabled)
-            .context("LZ4DIFF source decompression failed")?;
+    let decompressed_src = decompress_blob(
+        src_data,
+        &src_info.block_info,
+        src_info.zero_padding_enabled,
+    )
+    .context("LZ4DIFF source decompression failed")?;
 
     // 3. Apply inner patch (both BSDIFF and PUFFDIFF use bsdiff-compatible format)
     let decompressed_dst = match op_type {

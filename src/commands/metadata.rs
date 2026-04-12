@@ -59,21 +59,24 @@ pub fn run(args: MetadataArgs, insecure: bool) -> Result<()> {
     let header = payload.header();
     let manifest = payload.manifest();
 
-    let dyn_meta = manifest.dynamic_partition_metadata.as_ref().map(|d| DynPartMeta {
-        snapshot_enabled: d.snapshot_enabled,
-        vabc_enabled: d.vabc_enabled,
-        vabc_compression_param: d.vabc_compression_param.clone(),
-        cow_version: d.cow_version,
-        groups: d
-            .groups
-            .iter()
-            .map(|g| DynPartGroup {
-                name: g.name.clone(),
-                size: g.size,
-                partition_names: g.partition_names.clone(),
-            })
-            .collect(),
-    });
+    let dyn_meta = manifest
+        .dynamic_partition_metadata
+        .as_ref()
+        .map(|d| DynPartMeta {
+            snapshot_enabled: d.snapshot_enabled,
+            vabc_enabled: d.vabc_enabled,
+            vabc_compression_param: d.vabc_compression_param.clone(),
+            cow_version: d.cow_version,
+            groups: d
+                .groups
+                .iter()
+                .map(|g| DynPartGroup {
+                    name: g.name.clone(),
+                    size: g.size,
+                    partition_names: g.partition_names.clone(),
+                })
+                .collect(),
+        });
 
     let apex_info: Vec<ApexEntry> = manifest
         .apex_info
@@ -104,7 +107,10 @@ pub fn run(args: MetadataArgs, insecure: bool) -> Result<()> {
     } else {
         println!("Payload Metadata:");
         println!("  Version:                  {}", metadata.version);
-        println!("  Manifest size:            {} bytes", metadata.manifest_size);
+        println!(
+            "  Manifest size:            {} bytes",
+            metadata.manifest_size
+        );
         println!(
             "  Metadata signature size:  {} bytes",
             metadata.metadata_signature_size

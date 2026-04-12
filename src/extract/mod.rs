@@ -90,127 +90,128 @@ pub fn extract_partitions(
     .progress_chars("=> ");
 
     pool.install(|| {
-        partitions.par_iter().try_for_each(|partition| -> Result<()> {
-            let part_name = &partition.partition_name;
-            let output_path = if let Some(ref out_config) = config.out_config {
-                if let Some(custom_path) = out_config.get(part_name) {
-                    // Ensure parent directory exists for custom paths
-                    if let Some(parent) = custom_path.parent() {
-                        std::fs::create_dir_all(parent)?;
+        partitions
+            .par_iter()
+            .try_for_each(|partition| -> Result<()> {
+                let part_name = &partition.partition_name;
+                let output_path = if let Some(ref out_config) = config.out_config {
+                    if let Some(custom_path) = out_config.get(part_name) {
+                        // Ensure parent directory exists for custom paths
+                        if let Some(parent) = custom_path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        custom_path.clone()
+                    } else {
+                        output_dir.join(format!("{part_name}.img"))
                     }
-                    custom_path.clone()
                 } else {
                     output_dir.join(format!("{part_name}.img"))
-                }
-            } else {
-                output_dir.join(format!("{part_name}.img"))
-            };
+                };
 
-            // Determine partition size
-            let part_size = partition
-                .new_partition_info
-                .as_ref()
-                .and_then(|info| info.size)
-                .unwrap_or_else(|| {
-                    partition
-                        .operations
-                        .iter()
-                        .flat_map(|op| &op.dst_extents)
-                        .map(|ext| {
-                            (ext.start_block.unwrap_or(0) + ext.num_blocks.unwrap_or(0))
-                                * block_size as u64
-                        })
-                        .max()
-                        .unwrap_or(0)
-                });
+                // Determine partition size
+                let part_size = partition
+                    .new_partition_info
+                    .as_ref()
+                    .and_then(|info| info.size)
+                    .unwrap_or_else(|| {
+                        partition
+                            .operations
+                            .iter()
+                            .flat_map(|op| &op.dst_extents)
+                            .map(|ext| {
+                                (ext.start_block.unwrap_or(0) + ext.num_blocks.unwrap_or(0))
+                                    * block_size as u64
+                            })
+                            .max()
+                            .unwrap_or(0)
+                    });
 
-            // Create pre-allocated output file
-            let writer = Arc::new(PartitionWriter::new(&output_path, part_size, block_size)?);
+                // Create pre-allocated output file
+                let writer = Arc::new(PartitionWriter::new(&output_path, part_size, block_size)?);
 
-            // Open source partition for delta OTA if needed
-            let source_mmap = if let Some(ref source_dir) = config.source_dir {
-                let src_path =
-                    Path::new(source_dir).join(format!("{part_name}.img"));
-                if src_path.exists() {
-                    let file = std::fs::File::open(&src_path)?;
-                    Some(unsafe { memmap2::Mmap::map(&file) }?)
+                // Open source partition for delta OTA if needed
+                let source_mmap = if let Some(ref source_dir) = config.source_dir {
+                    let src_path = Path::new(source_dir).join(format!("{part_name}.img"));
+                    if src_path.exists() {
+                        let file = std::fs::File::open(&src_path)?;
+                        Some(unsafe { memmap2::Mmap::map(&file) }?)
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
-            // Build operation tasks
-            let mut tasks: Vec<OperationTask> = Vec::with_capacity(partition.operations.len());
-            for op in &partition.operations {
-                let op_type_raw = op.r#type();
-                let op_type = OpType::from_proto(op_type_raw).map_err(|_| {
-                    crate::error::PayloadError::UnsupportedOperation(op_type_raw as i32)
+                // Build operation tasks
+                let mut tasks: Vec<OperationTask> = Vec::with_capacity(partition.operations.len());
+                for op in &partition.operations {
+                    let op_type_raw = op.r#type();
+                    let op_type = OpType::from_proto(op_type_raw).map_err(|_| {
+                        crate::error::PayloadError::UnsupportedOperation(op_type_raw as i32)
+                    })?;
+
+                    let src_extents: Vec<(u64, u64)> = op
+                        .src_extents
+                        .iter()
+                        .map(|e| (e.start_block.unwrap_or(0), e.num_blocks.unwrap_or(0)))
+                        .collect();
+
+                    let dst_extents: Vec<(u64, u64)> = op
+                        .dst_extents
+                        .iter()
+                        .map(|e| (e.start_block.unwrap_or(0), e.num_blocks.unwrap_or(0)))
+                        .collect();
+
+                    tasks.push(OperationTask {
+                        op_type,
+                        data_offset: op.data_offset.unwrap_or(0),
+                        data_length: op.data_length.unwrap_or(0),
+                        src_extents,
+                        dst_extents,
+                        data_sha256: op.data_sha256_hash.clone(),
+                    });
+                }
+
+                // Sort by data_offset for sequential payload reads
+                tasks.sort_by_key(|t| t.data_offset);
+
+                // Setup progress bar
+                let pb = if !config.quiet {
+                    let pb = multi_progress.add(ProgressBar::new(tasks.len() as u64));
+                    pb.set_style(style.clone());
+                    pb.set_prefix(part_name.clone());
+                    Some(pb)
+                } else {
+                    None
+                };
+
+                let completed = AtomicU64::new(0);
+
+                // Execute operations in parallel via rayon
+                tasks.par_iter().try_for_each(|task| -> Result<()> {
+                    process_operation(
+                        payload,
+                        task,
+                        &writer,
+                        block_size,
+                        config,
+                        source_mmap.as_deref(),
+                    )?;
+
+                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(pb) = &pb {
+                        pb.set_position(done);
+                    }
+
+                    Ok(())
                 })?;
 
-                let src_extents: Vec<(u64, u64)> = op
-                    .src_extents
-                    .iter()
-                    .map(|e| (e.start_block.unwrap_or(0), e.num_blocks.unwrap_or(0)))
-                    .collect();
-
-                let dst_extents: Vec<(u64, u64)> = op
-                    .dst_extents
-                    .iter()
-                    .map(|e| (e.start_block.unwrap_or(0), e.num_blocks.unwrap_or(0)))
-                    .collect();
-
-                tasks.push(OperationTask {
-                    op_type,
-                    data_offset: op.data_offset.unwrap_or(0),
-                    data_length: op.data_length.unwrap_or(0),
-                    src_extents,
-                    dst_extents,
-                    data_sha256: op.data_sha256_hash.clone(),
-                });
-            }
-
-            // Sort by data_offset for sequential payload reads
-            tasks.sort_by_key(|t| t.data_offset);
-
-            // Setup progress bar
-            let pb = if !config.quiet {
-                let pb = multi_progress.add(ProgressBar::new(tasks.len() as u64));
-                pb.set_style(style.clone());
-                pb.set_prefix(part_name.clone());
-                Some(pb)
-            } else {
-                None
-            };
-
-            let completed = AtomicU64::new(0);
-
-            // Execute operations in parallel via rayon
-            tasks.par_iter().try_for_each(|task| -> Result<()> {
-                process_operation(
-                    payload,
-                    task,
-                    &writer,
-                    block_size,
-                    config,
-                    source_mmap.as_deref(),
-                )?;
-
-                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(pb) = &pb {
-                    pb.set_position(done);
+                    pb.finish_with_message("done");
                 }
 
                 Ok(())
-            })?;
-
-            if let Some(pb) = &pb {
-                pb.finish_with_message("done");
-            }
-
-            Ok(())
-        })
+            })
     })
 }
 
@@ -242,17 +243,15 @@ fn process_operation(
             write_to_extents(blob, &task.dst_extents, writer, block_size)?;
         }
         OpType::SourceCopy => {
-            let src = source_data.ok_or_else(|| {
-                anyhow::anyhow!("SOURCE_COPY requires source partition data")
-            })?;
+            let src = source_data
+                .ok_or_else(|| anyhow::anyhow!("SOURCE_COPY requires source partition data"))?;
             let data = read_from_extents(src, &task.src_extents, block_size);
             write_to_extents(&data, &task.dst_extents, writer, block_size)?;
         }
         OpType::SourceBsdiff => {
             // SOURCE_BSDIFF: BSDIFF40 format (bz2 compressed)
-            let src = source_data.ok_or_else(|| {
-                anyhow::anyhow!("SOURCE_BSDIFF requires source partition data")
-            })?;
+            let src = source_data
+                .ok_or_else(|| anyhow::anyhow!("SOURCE_BSDIFF requires source partition data"))?;
             let src_data = read_from_extents(src, &task.src_extents, block_size);
 
             let blob = get_blob(payload, task)?;
@@ -265,9 +264,8 @@ fn process_operation(
         }
         OpType::BrotliBsdiff => {
             // BROTLI_BSDIFF: BSDF2 format (brotli compressed streams)
-            let src = source_data.ok_or_else(|| {
-                anyhow::anyhow!("BROTLI_BSDIFF requires source partition data")
-            })?;
+            let src = source_data
+                .ok_or_else(|| anyhow::anyhow!("BROTLI_BSDIFF requires source partition data"))?;
             let src_data = read_from_extents(src, &task.src_extents, block_size);
 
             let blob = get_blob(payload, task)?;
@@ -281,9 +279,8 @@ fn process_operation(
             write_to_extents(&patched, &task.dst_extents, writer, block_size)?;
         }
         OpType::Puffdiff => {
-            let src = source_data.ok_or_else(|| {
-                anyhow::anyhow!("PUFFDIFF requires source partition data")
-            })?;
+            let src = source_data
+                .ok_or_else(|| anyhow::anyhow!("PUFFDIFF requires source partition data"))?;
             let src_data = read_from_extents(src, &task.src_extents, block_size);
 
             let blob = get_blob(payload, task)?;
@@ -296,9 +293,8 @@ fn process_operation(
             write_to_extents(&patched, &task.dst_extents, writer, block_size)?;
         }
         OpType::Zucchini => {
-            let src = source_data.ok_or_else(|| {
-                anyhow::anyhow!("ZUCCHINI requires source partition data")
-            })?;
+            let src = source_data
+                .ok_or_else(|| anyhow::anyhow!("ZUCCHINI requires source partition data"))?;
             let src_data = read_from_extents(src, &task.src_extents, block_size);
 
             let blob = get_blob(payload, task)?;
@@ -358,9 +354,8 @@ fn get_blob<'a>(payload: &'a PayloadView, task: &OperationTask) -> Result<&'a [u
 fn apply_bsdiff(old: &[u8], patch_data: &[u8], context: &str) -> Result<Vec<u8>> {
     let mut patch_reader = std::io::Cursor::new(patch_data);
     let mut new = Vec::new();
-    bsdiff_android::patch(old, &mut patch_reader, &mut new).map_err(|e| {
-        anyhow::anyhow!("{context} bsdiff patch failed: {e}")
-    })?;
+    bsdiff_android::patch(old, &mut patch_reader, &mut new)
+        .map_err(|e| anyhow::anyhow!("{context} bsdiff patch failed: {e}"))?;
     Ok(new)
 }
 

@@ -4,7 +4,10 @@ use crate::proto::PartitionUpdate;
 
 /// Verify SHA256 hash of data against expected hash.
 /// Returns Ok(()) if hashes match or if expected is None.
-pub fn verify_sha256(data: &[u8], expected: &Option<Vec<u8>>) -> Result<(), crate::error::PayloadError> {
+pub fn verify_sha256(
+    data: &[u8],
+    expected: &Option<Vec<u8>>,
+) -> Result<(), crate::error::PayloadError> {
     if let Some(expected_hash) = expected {
         let actual = Sha256::digest(data);
         if actual.as_slice() != expected_hash.as_slice() {
@@ -55,15 +58,10 @@ pub fn verify_hash_tree(
     };
 
     let salt = partition.hash_tree_salt.as_deref().unwrap_or(&[]);
-    let algorithm = partition
-        .hash_tree_algorithm
-        .as_deref()
-        .unwrap_or("sha256");
+    let algorithm = partition.hash_tree_algorithm.as_deref().unwrap_or("sha256");
 
     if algorithm != "sha256" {
-        anyhow::bail!(
-            "unsupported hash tree algorithm: '{algorithm}' (only sha256 is supported)"
-        );
+        anyhow::bail!("unsupported hash tree algorithm: '{algorithm}' (only sha256 is supported)");
     }
 
     // Calculate data range covered by hash tree
@@ -151,8 +149,7 @@ pub fn verify_fec(
 
     // Verify FEC extents are within bounds
     let fec_data_start = fec_data_extent.start_block.unwrap_or(0) * block_size as u64;
-    let fec_data_end =
-        fec_data_start + fec_data_extent.num_blocks.unwrap_or(0) * block_size as u64;
+    let fec_data_end = fec_data_start + fec_data_extent.num_blocks.unwrap_or(0) * block_size as u64;
     let fec_start = fec_extent.start_block.unwrap_or(0) * block_size as u64;
     let fec_end = fec_start + fec_extent.num_blocks.unwrap_or(0) * block_size as u64;
 

@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use prost::Message;
 
-use crate::payload::header::{HEADER_SIZE, MAGIC, PayloadHeader};
 use crate::payload::PayloadView;
+use crate::payload::header::{HEADER_SIZE, MAGIC, PayloadHeader};
 use crate::proto::DeltaArchiveManifest;
 
 use super::ZIP_MAGIC;
@@ -131,7 +131,10 @@ async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u6
         return Ok(0);
     }
     if head.len() < 4 || &head[..4] != ZIP_MAGIC {
-        bail!("unrecognized format (magic: {:02x?})", &head[..4.min(head.len())]);
+        bail!(
+            "unrecognized format (magic: {:02x?})",
+            &head[..4.min(head.len())]
+        );
     }
 
     eprintln!("Parsing remote ZIP ({})...", fmt(total_size));

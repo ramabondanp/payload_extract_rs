@@ -45,7 +45,9 @@ impl PartitionWriter {
             use std::os::windows::fs::FileExt;
             let mut written = 0;
             while written < data.len() {
-                let n = self.file.seek_write(&data[written..], offset + written as u64)?;
+                let n = self
+                    .file
+                    .seek_write(&data[written..], offset + written as u64)?;
                 written += n;
             }
         }

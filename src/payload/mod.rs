@@ -8,7 +8,7 @@ use prost::Message;
 use crate::error::PayloadError;
 use crate::proto::{DeltaArchiveManifest, PartitionUpdate};
 
-pub use header::{PayloadHeader, HEADER_SIZE};
+pub use header::{HEADER_SIZE, PayloadHeader};
 
 /// Data backing for PayloadView — either mmap'd file or in-memory buffer.
 enum PayloadData {
@@ -159,10 +159,12 @@ impl PayloadView {
         let abs_start =
             self.payload_offset as usize + self.data_offset as usize + data_offset as usize;
         let abs_end = abs_start + data_length as usize;
-        slice.get(abs_start..abs_end).ok_or(PayloadError::PayloadTooSmall {
-            expected: abs_end,
-            actual: slice.len(),
-        })
+        slice
+            .get(abs_start..abs_end)
+            .ok_or(PayloadError::PayloadTooSmall {
+                expected: abs_end,
+                actual: slice.len(),
+            })
     }
 
     #[allow(dead_code)]

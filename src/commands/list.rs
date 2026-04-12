@@ -53,10 +53,7 @@ pub fn run(args: ListArgs, insecure: bool) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&entries)?);
     } else if args.hash {
-        println!(
-            "{:<25} {:>12} {:>6}  SHA256",
-            "PARTITION", "SIZE", "OPS"
-        );
+        println!("{:<25} {:>12} {:>6}  SHA256", "PARTITION", "SIZE", "OPS");
         println!("{}", "-".repeat(110));
         for entry in &entries {
             println!(

@@ -44,8 +44,7 @@ pub fn open_for_extract(
 
 fn open_local_file(input: &str) -> Result<PayloadView> {
     let path = Path::new(input);
-    let file =
-        std::fs::File::open(path).with_context(|| format!("failed to open '{}'", input))?;
+    let file = std::fs::File::open(path).with_context(|| format!("failed to open '{}'", input))?;
 
     let mmap =
         unsafe { Mmap::map(&file) }.with_context(|| format!("failed to mmap '{}'", input))?;

@@ -126,8 +126,8 @@ fn build_partition_list(
 
 /// Parse output config file. Each line: `partition_name:/path/to/output`
 fn parse_out_config(path: &Path) -> Result<HashMap<String, PathBuf>> {
-    let content =
-        std::fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read '{}'", path.display()))?;
 
     let mut map = HashMap::new();
     for line in content.lines() {
