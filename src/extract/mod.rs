@@ -129,6 +129,13 @@ fn extract_selected(
         );
     }
 
+    if has_delta_ops {
+        let source_dir = config
+            .source_dir
+            .as_deref()
+            .expect("delta payloads require source_dir");
+        validate_source_partitions(&partitions, Path::new(source_dir))?;
+    }
     let multi_progress = MultiProgress::new();
     let progress_style =
         ProgressStyle::with_template("{prefix:>20} {msg:>10} [{bar:40.cyan/blue}] {percent:>3}%")
@@ -201,6 +208,8 @@ fn extract_selected(
                         src_extents,
                         dst_extents,
                         data_sha256: op.data_sha256_hash.clone(),
+                        src_sha256: op.src_sha256_hash.clone(),
+                        partition_name: partition.partition_name.clone(),
                     });
                 }
 
@@ -264,6 +273,44 @@ fn extract_selected(
     pool.install(|| partitions.par_iter().try_for_each(extract_partition))
 }
 
+fn validate_source_partitions(
+    partitions: &[&crate::proto::PartitionUpdate],
+    source_dir: &Path,
+) -> Result<()> {
+    for partition in partitions {
+        if !partition_has_delta_ops(partition) {
+            continue;
+        }
+
+        let src_path = source_dir.join(format!("{}.img", partition.partition_name));
+        if !src_path.exists() {
+            bail!(
+                "missing source partition image for '{}': {}",
+                partition.partition_name,
+                src_path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn partition_has_delta_ops(partition: &crate::proto::PartitionUpdate) -> bool {
+    partition.operations.iter().any(|op| {
+        let op_type = op.r#type();
+        matches!(
+            op_type,
+            crate::proto::install_operation::Type::SourceCopy
+                | crate::proto::install_operation::Type::SourceBsdiff
+                | crate::proto::install_operation::Type::BrotliBsdiff
+                | crate::proto::install_operation::Type::Puffdiff
+                | crate::proto::install_operation::Type::Zucchini
+                | crate::proto::install_operation::Type::Lz4diffBsdiff
+                | crate::proto::install_operation::Type::Lz4diffPuffdiff
+        )
+    })
+}
+
 /// Process a single extraction operation.
 fn process_operation(
     payload: &PayloadView,
@@ -283,7 +330,11 @@ fn process_operation(
             if task.op_type == OpType::Replace {
                 let blob = get_blob(payload, task)?;
                 if config.verify_ops {
-                    verify::verify_sha256(blob, &task.data_sha256)?;
+                    verify::verify_sha256(
+                        blob,
+                        &task.data_sha256,
+                        &format!("data hash mismatch for {}.img", task.partition_name),
+                    )?;
                 }
                 return write_to_extents(blob, &task.dst_extents, writer, block_size);
             }
@@ -308,12 +359,21 @@ fn process_operation(
             })?;
             let blob = get_blob(payload, task)?;
             if config.verify_ops {
-                verify::verify_sha256(blob, &task.data_sha256)?;
+                verify::verify_sha256(
+                    blob,
+                    &task.data_sha256,
+                    &format!("data hash mismatch for {}.img", task.partition_name),
+                )?;
             }
             bufpool::with_extent_buffer(
                 0,
                 |buf| {
                     read_from_extents(src, &task.src_extents, block_size, buf)?;
+                    verify::verify_sha256(
+                        buf,
+                        &task.src_sha256,
+                        &format!("source hash mismatch for {}.img", task.partition_name),
+                    )?;
                     let mut patched = Vec::new();
                     bsdiff_android::patch_bsdf2(buf, blob, &mut patched)
                         .map_err(|e| anyhow::anyhow!("{:?} patch failed: {e}", task.op_type))?;
@@ -341,12 +401,21 @@ fn process_operation(
             })?;
             let blob = get_blob(payload, task)?;
             if config.verify_ops {
-                verify::verify_sha256(blob, &task.data_sha256)?;
+                verify::verify_sha256(
+                    blob,
+                    &task.data_sha256,
+                    &format!("data hash mismatch for {}.img", task.partition_name),
+                )?;
             }
             bufpool::with_extent_buffer(
                 0,
                 |buf| {
                     read_from_extents(src, &task.src_extents, block_size, buf)?;
+                    verify::verify_sha256(
+                        buf,
+                        &task.src_sha256,
+                        &format!("source hash mismatch for {}.img", task.partition_name),
+                    )?;
                     let patched = lz4diff::apply_lz4diff(buf, blob, task.op_type)?;
                     write_to_extents(&patched, &task.dst_extents, writer, block_size)
                 },
@@ -368,7 +437,11 @@ fn verify_blob(payload: &PayloadView, task: &OperationTask) -> Result<()> {
     if task.data_sha256.is_none() {
         return Ok(());
     }
-    Ok(verify::verify_sha256(get_blob(payload, task)?, &task.data_sha256)?)
+    Ok(verify::verify_sha256(
+        get_blob(payload, task)?,
+        &task.data_sha256,
+        &format!("data hash mismatch for {}.img", task.partition_name),
+    )?)
 }
 
 fn stream_to_extents(reader: &mut impl Read, sink: &mut ExtentWriter<'_>) -> Result<()> {

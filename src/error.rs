@@ -14,8 +14,12 @@ pub enum PayloadError {
     #[error("failed to parse manifest: {0}")]
     ManifestParseFailed(#[from] prost::DecodeError),
 
-    #[error("hash mismatch: expected {expected}, got {actual}")]
-    HashMismatch { expected: String, actual: String },
+    #[error("{context}: expected {expected}, got {actual}")]
+    HashMismatch {
+        context: String,
+        expected: String,
+        actual: String,
+    },
 
     #[error("unsupported operation type: {0}")]
     UnsupportedOperation(i32),
