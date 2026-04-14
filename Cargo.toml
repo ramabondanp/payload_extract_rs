@@ -34,6 +34,7 @@ zstd = { version = "0.13", default-features = false }
 xz2 = "0.1"
 bzip2 = "0.6"
 lz4_flex = { version = "0.13", default-features = false }
+flate2 = "1"
 
 # Binary diff (Android BSDF2 format support for BROTLI_BSDIFF)
 bsdiff-android = "0.0.2"
@@ -55,6 +56,7 @@ hex = { version = "0.4", default-features = false, features = ["std"] }
 num_cpus = "1"
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = "1"
+time = { version = "0.3", default-features = false, features = ["formatting", "macros"] }
 
 # Async HTTP (feature-gated)
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time"], optional = true }

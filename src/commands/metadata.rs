@@ -1,6 +1,9 @@
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
+use time::OffsetDateTime;
+use time::UtcOffset;
+use time::format_description::well_known::Rfc3339;
 
 use crate::input;
 use crate::style;
@@ -23,8 +26,16 @@ struct PayloadMetadata {
     block_size: u32,
     partition_count: usize,
     max_timestamp: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_timestamp_utc: Option<String>,
     partial_update: Option<bool>,
     security_patch_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    post_build: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    post_osversion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pre_device: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dynamic_partition_metadata: Option<DynPartMeta>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -55,10 +66,34 @@ struct ApexEntry {
     decompressed_size: Option<i64>,
 }
 
+const HUMAN_UTC_TIMESTAMP_FORMAT: &[time::format_description::BorrowedFormatItem<'static>] = time::macros::format_description!(
+    "[weekday repr:short] [month repr:short] [day] [hour repr:12 padding:zero]:[minute]:[second] [period case:upper] UTC [year]"
+);
+
+fn format_unix_timestamp_utc(ts: i64) -> Option<String> {
+    OffsetDateTime::from_unix_timestamp(ts)
+        .ok()?
+        .format(&Rfc3339)
+        .ok()
+}
+
+fn format_unix_timestamp_utc_human(ts: i64) -> Option<String> {
+    OffsetDateTime::from_unix_timestamp(ts)
+        .ok()?
+        .to_offset(UtcOffset::UTC)
+        .format(HUMAN_UTC_TIMESTAMP_FORMAT)
+        .ok()
+}
+
+fn print_metadata_line(label: &str, value: impl std::fmt::Display) {
+    println!("  {:<25} {}", style::label().apply_to(label), value);
+}
+
 pub fn run(args: MetadataArgs, insecure: bool) -> Result<()> {
-    let payload = input::open(&args.input, insecure)?;
+    let (payload, ota_metadata) = input::open_with_ota_metadata(&args.input, insecure)?;
     let header = payload.header();
     let manifest = payload.manifest();
+    let max_timestamp_utc = manifest.max_timestamp.and_then(format_unix_timestamp_utc);
 
     let dyn_meta = manifest
         .dynamic_partition_metadata
@@ -97,8 +132,12 @@ pub fn run(args: MetadataArgs, insecure: bool) -> Result<()> {
         block_size: payload.block_size(),
         partition_count: manifest.partitions.len(),
         max_timestamp: manifest.max_timestamp,
+        max_timestamp_utc,
         partial_update: manifest.partial_update,
         security_patch_level: manifest.security_patch_level.clone(),
+        post_build: ota_metadata.as_ref().and_then(|m| m.post_build.clone()),
+        post_osversion: ota_metadata.as_ref().and_then(|m| m.post_osversion.clone()),
+        pre_device: ota_metadata.as_ref().and_then(|m| m.pre_device.clone()),
         dynamic_partition_metadata: dyn_meta,
         apex_info,
     };
@@ -107,48 +146,37 @@ pub fn run(args: MetadataArgs, insecure: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&metadata)?);
     } else {
         println!("{}", style::label().apply_to("Payload Metadata:"));
-        println!(
-            "  {}                  {}",
-            style::label().apply_to("Version:"),
-            metadata.version
+        print_metadata_line("Version:", metadata.version);
+        print_metadata_line(
+            "Manifest size:",
+            format!("{} bytes", metadata.manifest_size),
         );
-        println!(
-            "  {}            {} bytes",
-            style::label().apply_to("Manifest size:"),
-            metadata.manifest_size
+        print_metadata_line(
+            "Metadata signature size:",
+            format!("{} bytes", metadata.metadata_signature_size),
         );
-        println!(
-            "  {}  {} bytes",
-            style::label().apply_to("Metadata signature size:"),
-            metadata.metadata_signature_size
-        );
-        println!(
-            "  {}               {} bytes",
-            style::label().apply_to("Block size:"),
-            metadata.block_size
-        );
-        println!(
-            "  {}               {}",
-            style::label().apply_to("Partitions:"),
-            metadata.partition_count
-        );
+        print_metadata_line("Block size:", format!("{} bytes", metadata.block_size));
+        print_metadata_line("Partitions:", metadata.partition_count);
         if let Some(ts) = metadata.max_timestamp {
-            println!(
-                "  {}            {ts}",
-                style::label().apply_to("Max timestamp:")
-            );
+            print_metadata_line("Max timestamp:", ts);
+            let date = format_unix_timestamp_utc_human(ts)
+                .unwrap_or_else(|| "invalid timestamp".to_string());
+            print_metadata_line("Date:", date);
         }
         if let Some(partial) = metadata.partial_update {
-            println!(
-                "  {}           {partial}",
-                style::label().apply_to("Partial update:")
-            );
+            print_metadata_line("Partial update:", partial);
         }
         if let Some(ref spl) = metadata.security_patch_level {
-            println!(
-                "  {}     {spl}",
-                style::label().apply_to("Security patch level:")
-            );
+            print_metadata_line("Security patch level:", spl);
+        }
+        if let Some(ref post_build) = metadata.post_build {
+            print_metadata_line("Post build:", post_build);
+        }
+        if let Some(ref post_osversion) = metadata.post_osversion {
+            print_metadata_line("Post osversion:", post_osversion);
+        }
+        if let Some(ref pre_device) = metadata.pre_device {
+            print_metadata_line("Pre device:", pre_device);
         }
 
         if let Some(ref dyn_meta) = metadata.dynamic_partition_metadata {
