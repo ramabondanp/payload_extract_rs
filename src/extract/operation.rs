@@ -45,4 +45,6 @@ pub struct OperationTask {
     pub src_extents: Vec<(u64, u64)>,
     pub dst_extents: Vec<(u64, u64)>,
     pub data_sha256: Option<Vec<u8>>,
+    pub src_sha256: Option<Vec<u8>>,
+    pub partition_name: String,
 }
