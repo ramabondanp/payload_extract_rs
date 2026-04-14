@@ -68,7 +68,7 @@ prost-build = "0.14"
 protoc-bin-vendored = "3"
 
 [features]
-default = ["http-native-tls"]
+default = ["http-vendored-tls"]
 http = ["dep:tokio", "dep:reqwest", "dep:futures"]
 http-native-tls = ["http", "reqwest?/native-tls"]
 http-vendored-tls = ["http", "reqwest?/native-tls-vendored"]
