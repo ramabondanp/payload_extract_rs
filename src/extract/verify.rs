@@ -7,11 +7,13 @@ use crate::proto::PartitionUpdate;
 pub fn verify_sha256(
     data: &[u8],
     expected: &Option<Vec<u8>>,
+    context: &str,
 ) -> Result<(), crate::error::PayloadError> {
     if let Some(expected_hash) = expected {
         let actual = Sha256::digest(data);
         if actual.as_slice() != expected_hash.as_slice() {
             return Err(crate::error::PayloadError::HashMismatch {
+                context: context.to_string(),
                 expected: hex::encode(expected_hash),
                 actual: hex::encode(actual),
             });
