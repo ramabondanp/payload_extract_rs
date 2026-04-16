@@ -1,10 +1,13 @@
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use flate2::read::DeflateDecoder;
 use prost::Message;
+use prost::bytes::{Buf, Bytes};
 
 use crate::payload::PayloadView;
 use crate::payload::header::{HEADER_SIZE, MAGIC, PayloadHeader};
@@ -36,11 +39,79 @@ async fn range_download(
     url: &str,
     offset: u64,
     length: u64,
+    progress: Option<Arc<AtomicU64>>,
 ) -> Result<Vec<u8>> {
+    let buf = Arc::new(Mutex::new(Vec::with_capacity(length as usize)));
+    {
+        let buf = buf.clone();
+        range_download_internal(
+            client,
+            url,
+            offset,
+            length,
+            progress,
+            move |chunk: Bytes, _| {
+                let buf = buf.clone();
+                Box::pin(async move {
+                    buf.lock().unwrap().extend_from_slice(&chunk);
+                    Ok(())
+                })
+            },
+        )
+        .await?;
+    }
+    let res = Arc::try_unwrap(buf).unwrap().into_inner().unwrap();
+    Ok(res)
+}
+
+async fn range_download_to_file(
+    client: &reqwest::Client,
+    url: &str,
+    offset: u64,
+    length: u64,
+    dest: Arc<Mutex<std::fs::File>>,
+    dest_offset: u64,
+    progress: Option<Arc<AtomicU64>>,
+) -> Result<()> {
+    range_download_internal(
+        client,
+        url,
+        offset,
+        length,
+        progress,
+        |chunk: Bytes, relative_off| {
+            let dest = dest.clone();
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut f = dest.lock().unwrap();
+                    f.seek(SeekFrom::Start(dest_offset + relative_off))?;
+                    f.write_all(&chunk)?;
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await?
+            })
+        },
+    )
+    .await
+}
+
+async fn range_download_internal<F>(
+    client: &reqwest::Client,
+    url: &str,
+    offset: u64,
+    length: u64,
+    progress: Option<Arc<AtomicU64>>,
+    mut writer: F,
+) -> Result<()>
+where
+    F: FnMut(Bytes, u64) -> std::pin::Pin<Box<dyn futures::Future<Output = Result<()>> + Send>>,
+{
     use futures::StreamExt;
 
     let end = offset + length - 1;
-    for attempt in 0..=3u32 {
+    for attempt in 0..=10u32 {
+        let mut downloaded_this_attempt = 0u64;
+
         let resp = match client
             .get(url)
             .header("Range", format!("bytes={offset}-{end}"))
@@ -49,58 +120,101 @@ async fn range_download(
         {
             Ok(r) => r,
             Err(e) => {
-                if attempt == 3 {
+                if attempt == 10 {
                     return Err(e).context("max retries exceeded");
                 }
-                tokio::time::sleep(Duration::from_millis(1000 * 2u64.pow(attempt))).await;
+                let backoff = Duration::from_millis(1000 * 2u64.pow(attempt.min(6)));
+                tokio::time::sleep(backoff).await;
                 continue;
             }
         };
 
         let status = resp.status();
-        if status == reqwest::StatusCode::PARTIAL_CONTENT {
-            return Ok(resp.bytes().await?.to_vec());
-        }
+        let res: Result<()> =
+            if status == reqwest::StatusCode::PARTIAL_CONTENT || status.is_success() {
+                let mut stream = resp.bytes_stream();
+                let mut to_skip = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+                    0
+                } else {
+                    offset
+                };
+                let mut to_read = length as usize;
 
-        if status.is_success() {
-            // 200 fallback: stream only requested bytes to prevent OOM
-            let mut buf = Vec::with_capacity(length as usize);
-            let mut stream = resp.bytes_stream();
-            let mut to_skip = offset;
-            let mut to_read = length as usize;
-
-            while to_read > 0 {
-                match stream.next().await {
-                    Some(Ok(chunk)) => {
-                        let chunk = &chunk[..];
-                        if to_skip > 0 {
-                            let skip = (to_skip as usize).min(chunk.len());
-                            to_skip -= skip as u64;
-                            let remaining_chunk = &chunk[skip..];
-                            if !remaining_chunk.is_empty() {
-                                let take = remaining_chunk.len().min(to_read);
-                                buf.extend_from_slice(&remaining_chunk[..take]);
+                while to_read > 0 {
+                    match stream.next().await {
+                        Some(Ok(chunk)) => {
+                            let mut chunk = chunk;
+                            if to_skip > 0 {
+                                let skip = (to_skip as usize).min(chunk.len());
+                                to_skip -= skip as u64;
+                                chunk.advance(skip);
+                                if !chunk.is_empty() {
+                                    let take = chunk.len().min(to_read);
+                                    let data = chunk.split_to(take);
+                                    writer(data, downloaded_this_attempt).await?;
+                                    to_read -= take;
+                                    downloaded_this_attempt += take as u64;
+                                    if let Some(ref p) = progress {
+                                        p.fetch_add(take as u64, Ordering::Relaxed);
+                                    }
+                                }
+                            } else {
+                                let take = chunk.len().min(to_read);
+                                let data = chunk.split_to(take);
+                                writer(data, downloaded_this_attempt).await?;
                                 to_read -= take;
+                                downloaded_this_attempt += take as u64;
+                                if let Some(ref p) = progress {
+                                    p.fetch_add(take as u64, Ordering::Relaxed);
+                                }
                             }
-                        } else {
-                            let take = chunk.len().min(to_read);
-                            buf.extend_from_slice(&chunk[..take]);
-                            to_read -= take;
                         }
+                        Some(Err(_e)) => {
+                            break; // Trigger retry
+                        }
+                        None => break,
                     }
-                    Some(Err(e)) => return Err(e).context("stream error"),
-                    None => break,
                 }
-            }
-            return Ok(buf);
-        }
 
-        if attempt == 3 {
-            bail!("HTTP {status} for range {offset}-{end}");
+                if to_read == 0 {
+                    Ok(())
+                } else {
+                    bail!("stream ended prematurely ({} bytes remaining)", to_read)
+                }
+            } else {
+                bail!("HTTP {status} for range {offset}-{end}")
+            };
+
+        match res {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                if let Some(ref p) = progress {
+                    p.fetch_sub(downloaded_this_attempt, Ordering::Relaxed);
+                }
+                if attempt == 10 {
+                    return Err(e).context("max retries exceeded after failure");
+                }
+                // Use a longer backoff for 503/429 or other server errors
+                let base = if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                    5000 // 5s base for 503
+                } else {
+                    2000 // 2s base otherwise
+                };
+                let backoff = Duration::from_millis(base * 2u64.pow(attempt.min(5)));
+                tokio::time::sleep(backoff).await;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(1000 * 2u64.pow(attempt))).await;
     }
     unreachable!()
+}
+
+async fn resolve_final_url(client: &reqwest::Client, url: &str) -> Result<String> {
+    let resp = client
+        .head(url)
+        .send()
+        .await
+        .context("failed to resolve final URL")?;
+    Ok(resp.url().to_string())
 }
 
 async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u64> {
@@ -127,7 +241,7 @@ async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u6
     let head = if head.len() >= 4 {
         head
     } else {
-        range_download(client, url, 0, 4).await?
+        range_download(client, url, 0, 4, None).await?
     };
 
     if head.len() >= 4 && &head[..4] == MAGIC {
@@ -147,7 +261,7 @@ async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u6
     );
     let tail_size = (256 * 1024u64).min(total_size);
     let tail_offset = total_size - tail_size;
-    let tail = range_download(client, url, tail_offset, tail_size).await?;
+    let tail = range_download(client, url, tail_offset, tail_size, None).await?;
 
     let eocd_pos = tail
         .windows(4)
@@ -163,7 +277,7 @@ async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u6
             let i = (z64_off - tail_offset) as usize;
             tail[i..i + 56].to_vec()
         } else {
-            range_download(client, url, z64_off, 56).await?
+            range_download(client, url, z64_off, 56, None).await?
         };
         (
             u64::from_le_bytes(rec[48..56].try_into().unwrap()),
@@ -181,7 +295,7 @@ async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u6
         let i = (cd_offset - tail_offset) as usize;
         tail[i..i + cd_size as usize].to_vec()
     } else {
-        range_download(client, url, cd_offset, cd_size).await?
+        range_download(client, url, cd_offset, cd_size, None).await?
     };
 
     let mut pos = 0usize;
@@ -205,7 +319,7 @@ async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u6
                 let extra = &cd[pos + 46 + name_len..pos + 46 + name_len + extra_len];
                 offset = parse_zip64_offset(extra, offset);
             }
-            let lfh = range_download(client, url, offset, 30).await?;
+            let lfh = range_download(client, url, offset, 30, None).await?;
             let n = u16::from_le_bytes(lfh[26..28].try_into().unwrap()) as u64;
             let e = u16::from_le_bytes(lfh[28..30].try_into().unwrap()) as u64;
             return Ok(offset + 30 + n + e);
@@ -309,7 +423,7 @@ async fn inspect_remote_payload_and_ota(
     );
     let tail_size = (256 * 1024u64).min(total_size);
     let tail_offset = total_size - tail_size;
-    let tail = range_download(client, url, tail_offset, tail_size).await?;
+    let tail = range_download(client, url, tail_offset, tail_size, None).await?;
 
     let eocd_pos = tail
         .windows(4)
@@ -325,7 +439,7 @@ async fn inspect_remote_payload_and_ota(
             let i = (z64_off - tail_offset) as usize;
             tail[i..i + 56].to_vec()
         } else {
-            range_download(client, url, z64_off, 56).await?
+            range_download(client, url, z64_off, 56, None).await?
         };
         (
             u64::from_le_bytes(rec[48..56].try_into().unwrap()),
@@ -343,7 +457,7 @@ async fn inspect_remote_payload_and_ota(
         let i = (cd_offset - tail_offset) as usize;
         tail[i..i + cd_size as usize].to_vec()
     } else {
-        range_download(client, url, cd_offset, cd_size).await?
+        range_download(client, url, cd_offset, cd_size, None).await?
     };
 
     let mut pos = 0usize;
@@ -373,14 +487,14 @@ async fn inspect_remote_payload_and_ota(
             let (compressed_size, uncompressed_size, local_offset) =
                 parse_zip64_entry_fields(extra, compressed_size, uncompressed_size, local_offset);
 
-            let lfh = range_download(client, url, local_offset, 30).await?;
+            let lfh = range_download(client, url, local_offset, 30, None).await?;
             let local_name_len = u16::from_le_bytes(lfh[26..28].try_into().unwrap()) as u64;
             let local_extra_len = u16::from_le_bytes(lfh[28..30].try_into().unwrap()) as u64;
             let data_offset = local_offset + 30 + local_name_len + local_extra_len;
             if name == "payload.bin" {
                 payload_offset = Some(data_offset);
             } else {
-                let data = range_download(client, url, data_offset, compressed_size).await?;
+                let data = range_download(client, url, data_offset, compressed_size, None).await?;
                 let contents = match compression {
                     0 => data,
                     8 => {
@@ -433,7 +547,7 @@ pub fn open_http_metadata_with_ota(
         let (payload_off, ota_metadata) = inspect_remote_payload_and_ota(&client, url).await?;
 
         eprintln!("{}...", style::label().apply_to("Fetching payload header"));
-        let hdr = range_download(&client, url, payload_off, HEADER_SIZE as u64).await?;
+        let hdr = range_download(&client, url, payload_off, HEADER_SIZE as u64, None).await?;
         let header = PayloadHeader::parse(&hdr)?;
 
         let meta_len =
@@ -443,7 +557,7 @@ pub fn open_http_metadata_with_ota(
             style::label().apply_to("Fetching manifest"),
             style::format_size(header.manifest_size)
         );
-        let meta = range_download(&client, url, payload_off, meta_len).await?;
+        let meta = range_download(&client, url, payload_off, meta_len, None).await?;
 
         Ok((
             PayloadView::from_memory(meta, HashMap::new())?,
@@ -460,10 +574,13 @@ pub fn open_http_extract(
     let rt = build_runtime()?;
     rt.block_on(async {
         let client = build_client(insecure)?;
+        let final_url = resolve_final_url(&client, url).await?;
+        let url = final_url.as_str();
+
         let payload_off = detect_payload_offset(&client, url).await?;
 
         eprintln!("{}...", style::label().apply_to("Fetching payload header"));
-        let hdr = range_download(&client, url, payload_off, HEADER_SIZE as u64).await?;
+        let hdr = range_download(&client, url, payload_off, HEADER_SIZE as u64, None).await?;
         let header = PayloadHeader::parse(&hdr)?;
 
         let meta_len =
@@ -473,7 +590,7 @@ pub fn open_http_extract(
             style::label().apply_to("Fetching manifest"),
             style::format_size(header.manifest_size)
         );
-        let meta = range_download(&client, url, payload_off, meta_len).await?;
+        let meta = range_download(&client, url, payload_off, meta_len, None).await?;
 
         let manifest = DeltaArchiveManifest::decode(
             &meta[HEADER_SIZE..HEADER_SIZE + header.manifest_size as usize],
@@ -518,28 +635,95 @@ pub fn open_http_extract(
             format_args!("{} ({} range(s))", style::format_size(total_data), merged.len()),
         );
 
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
+        struct TempFileGuard {
+            path: std::path::PathBuf,
+            active: bool,
+        }
+
+        impl Drop for TempFileGuard {
+            fn drop(&mut self) {
+                if self.active {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+        }
+
+        let mut temp_path = std::env::temp_dir();
+        temp_path.push(format!(
+            "payload-extract-{}-{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let mut guard = TempFileGuard {
+            path: temp_path.clone(),
+            active: true,
+        };
+
+        let mut file = std::fs::File::create(&guard.path)
+            .with_context(|| format!("failed to create temp file {}", guard.path.display()))?;
+        let meta_len_u64 = meta.len() as u64;
+        file.set_len(meta_len_u64 + total_data)?;
+        file.write_all(&meta)?;
+
+        let file = Arc::new(Mutex::new(file));
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let sem = Arc::new(tokio::sync::Semaphore::new(5));
+
+        let mut remap: HashMap<u64, (u64, u64)> = HashMap::new();
+        let mut current_dest_off = meta_len_u64;
 
         let client = Arc::new(client);
-        let url: Arc<str> = Arc::from(url);
-        let downloaded = Arc::new(AtomicU64::new(0));
-        let sem = Arc::new(tokio::sync::Semaphore::new(8));
+        let url_arc: Arc<str> = Arc::from(url);
+        let mut handles = Vec::new();
 
-        let mut handles = Vec::with_capacity(merged.len());
-        for &(data_region_off, length) in &merged {
-            let client = client.clone();
-            let url = url.clone();
-            let downloaded = downloaded.clone();
-            let sem = sem.clone();
-            let remote_off = payload_off + data_offset + data_region_off;
+        const MAX_RANGE_SIZE: u64 = 32 * 1024 * 1024; // 32 MB chunks
 
-            handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                let data = range_download(&client, &url, remote_off, length).await?;
-                downloaded.fetch_add(data.len() as u64, Ordering::Relaxed);
-                Ok::<_, anyhow::Error>((data_region_off, data))
-            }));
+        for &(merged_off, merged_len) in &merged {
+            let mut remaining = merged_len;
+            let mut sub_off = 0u64;
+
+            while remaining > 0 {
+                let chunk_len = remaining.min(MAX_RANGE_SIZE);
+                let dest_off = current_dest_off + sub_off;
+                let client = client.clone();
+                let url = url_arc.clone();
+                let downloaded = downloaded.clone();
+                let sem = sem.clone();
+                let file = file.clone();
+                let remote_off = payload_off + data_offset + merged_off + sub_off;
+
+                handles.push(tokio::spawn(async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    range_download_to_file(
+                        &client,
+                        &url,
+                        remote_off,
+                        chunk_len,
+                        file,
+                        dest_off,
+                        Some(downloaded),
+                    )
+                    .await
+                }));
+
+                remaining -= chunk_len;
+                sub_off += chunk_len;
+                // Stagger requests slightly to avoid hitting rate limits on startup
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            // Map all op_ranges that fall within this merged range
+            for &(op_off, op_len) in &op_ranges {
+                if op_off >= merged_off && op_off + op_len <= merged_off + merged_len {
+                    let within = op_off - merged_off;
+                    remap.insert(op_off, (current_dest_off + within, op_len));
+                }
+            }
+            current_dest_off += merged_len;
         }
 
         let pb = indicatif::ProgressBar::new(total_data);
@@ -552,46 +736,42 @@ pub fn open_http_extract(
         );
         pb.set_prefix("Downloading");
 
-        let mut range_data: Vec<(u64, Vec<u8>)> = Vec::with_capacity(merged.len());
+        // Spawn progress updater
+        let pb_task = {
+            let pb = pb.clone();
+            let downloaded = downloaded.clone();
+            tokio::spawn(async move {
+                while !pb.is_finished() {
+                    pb.set_position(downloaded.load(Ordering::Relaxed));
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+        };
+
         for handle in handles {
-            let (off, data) = handle.await??;
-            let done = downloaded.load(Ordering::Relaxed);
-            pb.set_position(done);
-            range_data.push((off, data));
+            handle.await??;
         }
         pb.finish_and_clear();
-
-        let mut buf = meta;
-        let mut remap: HashMap<u64, (u64, u64)> = HashMap::new();
-
-        for &(op_off, op_len) in &op_ranges {
-            if remap.contains_key(&op_off) {
-                continue;
-            }
-            for (merged_off, merged_data) in &range_data {
-                if op_off >= *merged_off
-                    && op_off + op_len <= *merged_off + merged_data.len() as u64
-                {
-                    let within = (op_off - *merged_off) as usize;
-                    let compact_pos = buf.len() as u64;
-                    buf.extend_from_slice(&merged_data[within..within + op_len as usize]);
-                    remap.insert(op_off, (compact_pos, op_len));
-                    break;
-                }
-            }
-        }
+        pb_task.abort();
 
         style::log(
             "Buffer",
             format_args!(
-                "{} (meta {} + data {})",
-                style::format_size(buf.len() as u64),
-                style::format_size(meta_len),
-                style::format_size(buf.len() as u64 - meta_len),
+                "{} (meta {} + data {}) [MMAP]",
+                style::format_size(current_dest_off),
+                style::format_size(meta_len_u64),
+                style::format_size(total_data),
             ),
         );
 
-        Ok(PayloadView::from_memory(buf, remap)?)
+        let file = std::fs::File::open(&guard.path)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        // Deactivate guard and remove file manually. 
+        // On Unix, the mmap keeps the data alive even after remove_file.
+        guard.active = false;
+        let _ = std::fs::remove_file(&guard.path);
+
+        Ok(PayloadView::from_mmap_with_remap(mmap, 0, remap)?)
     })
 }
 
