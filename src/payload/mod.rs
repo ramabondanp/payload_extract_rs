@@ -52,6 +52,17 @@ impl PayloadView {
         Self::from_data(data, payload_offset, None)
     }
 
+    /// Create a PayloadView from a memory-mapped file with offset remapping.
+    /// Used for HTTP selective download where data is stored in a temporary file.
+    pub fn from_mmap_with_remap(
+        mmap: Mmap,
+        payload_offset: u64,
+        remap: HashMap<u64, (u64, u64)>,
+    ) -> Result<Self, PayloadError> {
+        let data = PayloadData::Mmap(mmap);
+        Self::from_data(data, payload_offset, Some(remap))
+    }
+
     /// Create a PayloadView from an in-memory buffer with offset remapping.
     /// Used for HTTP selective download where data is packed compactly.
     pub fn from_memory(
