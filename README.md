@@ -91,6 +91,17 @@ payload-extract metadata payload.bin
 payload-extract metadata payload.bin --json
 ```
 
+#### Show OTA package metadata
+
+Reads `META-INF/com/android/metadata` (key=value text) and `META-INF/com/android/metadata.pb`
+(protobuf `OtaMetadata`) from an OTA ZIP. Local files and HTTP URLs are both supported.
+
+```bash
+payload-extract ota-metadata ota.zip
+payload-extract ota-metadata ota.zip --json
+payload-extract ota-metadata "https://example.com/ota.zip"
+```
+
 #### Global options
 
 ```bash
@@ -197,6 +208,17 @@ payload-extract verify payload.bin -d output/ --hash-tree --fec
 ```bash
 payload-extract metadata payload.bin
 payload-extract metadata payload.bin --json
+```
+
+#### 显示 OTA 包元数据
+
+读取 OTA ZIP 中的 `META-INF/com/android/metadata`（key=value 文本）与
+`META-INF/com/android/metadata.pb`（protobuf `OtaMetadata`），支持本地文件和 HTTP URL。
+
+```bash
+payload-extract ota-metadata ota.zip
+payload-extract ota-metadata ota.zip --json
+payload-extract ota-metadata "https://example.com/ota.zip"
 ```
 
 #### 全局选项

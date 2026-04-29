@@ -6,9 +6,10 @@ pub mod http;
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 
+use crate::ota_metadata::OtaMetadataData;
 use crate::payload::PayloadView;
 
 pub(crate) const ZIP_MAGIC: &[u8; 4] = &[0x50, 0x4B, 0x03, 0x04];
@@ -40,6 +41,26 @@ pub fn open_for_extract(
 
     let _ = (partition_names, insecure);
     open_local_file(input)
+}
+
+/// Read the OTA metadata files (META-INF/com/android/metadata and metadata.pb)
+/// from an OTA ZIP archive (local file or HTTP URL).
+pub fn read_ota_metadata(input: &str, insecure: bool) -> Result<OtaMetadataData> {
+    #[cfg(feature = "http")]
+    if input.starts_with("http://") || input.starts_with("https://") {
+        return http::read_ota_metadata_http(input, insecure);
+    }
+
+    let _ = insecure;
+    let path = Path::new(input);
+    let file = std::fs::File::open(path).with_context(|| format!("failed to open '{}'", input))?;
+    let mmap =
+        unsafe { Mmap::map(&file) }.with_context(|| format!("failed to mmap '{}'", input))?;
+
+    if mmap.len() < 4 || &mmap[0..4] != ZIP_MAGIC {
+        bail!("input is not an OTA ZIP archive");
+    }
+    zip_input::read_ota_metadata_from_mmap(&mmap).context("failed to read OTA metadata")
 }
 
 fn open_local_file(input: &str) -> Result<PayloadView> {

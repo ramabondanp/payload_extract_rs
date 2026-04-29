@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use prost::Message;
 
+use crate::ota_metadata::{self, OtaMetadataData};
 use crate::payload::PayloadView;
 use crate::payload::header::{HEADER_SIZE, MAGIC, PayloadHeader};
 use crate::proto::DeltaArchiveManifest;
@@ -102,31 +103,7 @@ async fn range_download(
 }
 
 async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u64> {
-    let resp = client
-        .get(url)
-        .header("Range", "bytes=0-3")
-        .send()
-        .await?
-        .error_for_status()?;
-
-    let total_size = if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-        resp.headers()
-            .get("content-range")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.rsplit('/').next())
-            .and_then(|s| s.parse::<u64>().ok())
-            .context("cannot determine file size from Content-Range")?
-    } else {
-        resp.content_length()
-            .context("server returned no Content-Length")?
-    };
-
-    let head = resp.bytes().await?.to_vec();
-    let head = if head.len() >= 4 {
-        head
-    } else {
-        range_download(client, url, 0, 4).await?
-    };
+    let (total_size, head) = fetch_total_size_and_head(client, url).await?;
 
     if head.len() >= 4 && &head[..4] == MAGIC {
         return Ok(0);
@@ -143,87 +120,13 @@ async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u6
         style::label().apply_to("Parsing remote ZIP"),
         style::format_size(total_size)
     );
-    let tail_size = (256 * 1024u64).min(total_size);
-    let tail_offset = total_size - tail_size;
-    let tail = range_download(client, url, tail_offset, tail_size).await?;
+    let cd = fetch_zip_cd(client, url, total_size).await?;
+    let entry = find_cd_entry(&cd, "payload.bin").context("payload.bin not found in remote ZIP")?;
 
-    let eocd_pos = tail
-        .windows(4)
-        .rposition(|w| w == ZIP_EOCD_SIG)
-        .context("EOCD not found")?;
-
-    let is_zip64 = eocd_pos >= 20 && tail[eocd_pos - 20..eocd_pos - 16] == ZIP64_LOCATOR_SIG;
-
-    let (cd_offset, cd_size) = if is_zip64 {
-        let locator = &tail[eocd_pos - 20..eocd_pos];
-        let z64_off = u64::from_le_bytes(locator[8..16].try_into().unwrap());
-        let rec = if z64_off >= tail_offset {
-            let i = (z64_off - tail_offset) as usize;
-            tail[i..i + 56].to_vec()
-        } else {
-            range_download(client, url, z64_off, 56).await?
-        };
-        (
-            u64::from_le_bytes(rec[48..56].try_into().unwrap()),
-            u64::from_le_bytes(rec[40..48].try_into().unwrap()),
-        )
-    } else {
-        let eocd = &tail[eocd_pos..];
-        (
-            u32::from_le_bytes(eocd[16..20].try_into().unwrap()) as u64,
-            u32::from_le_bytes(eocd[12..16].try_into().unwrap()) as u64,
-        )
-    };
-
-    let cd = if cd_offset >= tail_offset {
-        let i = (cd_offset - tail_offset) as usize;
-        tail[i..i + cd_size as usize].to_vec()
-    } else {
-        range_download(client, url, cd_offset, cd_size).await?
-    };
-
-    let mut pos = 0usize;
-    while pos + 46 <= cd.len() {
-        if cd[pos..pos + 4] != ZIP_CD_SIG {
-            break;
-        }
-        let name_len = u16::from_le_bytes(cd[pos + 28..pos + 30].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(cd[pos + 30..pos + 32].try_into().unwrap()) as usize;
-        let comment_len = u16::from_le_bytes(cd[pos + 32..pos + 34].try_into().unwrap()) as usize;
-        let local_off = u32::from_le_bytes(cd[pos + 42..pos + 46].try_into().unwrap());
-
-        if pos + 46 + name_len > cd.len() {
-            break;
-        }
-        let name = std::str::from_utf8(&cd[pos + 46..pos + 46 + name_len]).unwrap_or("");
-
-        if name == "payload.bin" {
-            let mut offset = local_off as u64;
-            if local_off == 0xFFFFFFFF {
-                let extra = &cd[pos + 46 + name_len..pos + 46 + name_len + extra_len];
-                offset = parse_zip64_offset(extra, offset);
-            }
-            let lfh = range_download(client, url, offset, 30).await?;
-            let n = u16::from_le_bytes(lfh[26..28].try_into().unwrap()) as u64;
-            let e = u16::from_le_bytes(lfh[28..30].try_into().unwrap()) as u64;
-            return Ok(offset + 30 + n + e);
-        }
-        pos += 46 + name_len + extra_len + comment_len;
-    }
-    bail!("payload.bin not found in remote ZIP");
-}
-
-fn parse_zip64_offset(extra: &[u8], default: u64) -> u64 {
-    let mut p = 0;
-    while p + 4 <= extra.len() {
-        let tag = u16::from_le_bytes(extra[p..p + 2].try_into().unwrap());
-        let sz = u16::from_le_bytes(extra[p + 2..p + 4].try_into().unwrap()) as usize;
-        if tag == 0x0001 && p + 4 + sz <= extra.len() && sz >= 24 {
-            return u64::from_le_bytes(extra[p + 20..p + 28].try_into().unwrap());
-        }
-        p += 4 + sz;
-    }
-    default
+    let lfh = range_download(client, url, entry.local_off, 30).await?;
+    let n = u16::from_le_bytes(lfh[26..28].try_into().unwrap()) as u64;
+    let e = u16::from_le_bytes(lfh[28..30].try_into().unwrap()) as u64;
+    Ok(entry.local_off + 30 + n + e)
 }
 
 pub fn open_http_metadata(url: &str, insecure: bool) -> Result<PayloadView> {
@@ -390,6 +293,238 @@ pub fn open_http_extract(
 
         Ok(PayloadView::from_memory(buf, remap)?)
     })
+}
+
+/// Fetch META-INF/com/android/metadata and metadata.pb from a remote OTA ZIP.
+/// The two entries are downloaded concurrently after a single CD fetch.
+pub fn read_ota_metadata_http(url: &str, insecure: bool) -> Result<OtaMetadataData> {
+    let rt = build_runtime()?;
+    rt.block_on(async {
+        let client = build_client(insecure)?;
+        let (total_size, head) = fetch_total_size_and_head(&client, url).await?;
+        if head.len() < 4 || &head[..4] != ZIP_MAGIC {
+            bail!(
+                "URL is not an OTA ZIP (magic: {:02x?})",
+                &head[..4.min(head.len())]
+            );
+        }
+        let cd = fetch_zip_cd(&client, url, total_size).await?;
+
+        let (text_bytes, pb_bytes) = tokio::try_join!(
+            download_stored_zip_entry(&client, url, &cd, ota_metadata::text_entry_name()),
+            download_stored_zip_entry(&client, url, &cd, ota_metadata::pb_entry_name()),
+        )?;
+
+        let mut data = OtaMetadataData::default();
+        if let Some(b) = text_bytes {
+            data.text = Some(ota_metadata::parse_text(&String::from_utf8_lossy(&b)));
+        }
+        if let Some(b) = pb_bytes {
+            data.pb = Some(ota_metadata::parse_pb_bytes(&b)?);
+        }
+        Ok(data)
+    })
+}
+
+/// One-shot fetch of bytes 0..=3 that returns both the file's total size (from
+/// Content-Range or Content-Length) and the first four bytes for magic detection.
+async fn fetch_total_size_and_head(client: &reqwest::Client, url: &str) -> Result<(u64, Vec<u8>)> {
+    let resp = client
+        .get(url)
+        .header("Range", "bytes=0-3")
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let total_size = if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        resp.headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.rsplit('/').next())
+            .and_then(|s| s.parse::<u64>().ok())
+            .context("cannot determine file size from Content-Range")?
+    } else {
+        resp.content_length()
+            .context("server returned no Content-Length")?
+    };
+
+    let head = resp.bytes().await?.to_vec();
+    let head = if head.len() >= 4 {
+        head
+    } else {
+        range_download(client, url, 0, 4).await?
+    };
+    Ok((total_size, head))
+}
+
+/// Locate the EOCD (and optional ZIP64 record) and return the central directory bytes.
+async fn fetch_zip_cd(client: &reqwest::Client, url: &str, total_size: u64) -> Result<Vec<u8>> {
+    let tail_size = (256 * 1024u64).min(total_size);
+    let tail_offset = total_size - tail_size;
+    let tail = range_download(client, url, tail_offset, tail_size).await?;
+
+    let eocd_pos = tail
+        .windows(4)
+        .rposition(|w| w == ZIP_EOCD_SIG)
+        .context("EOCD not found")?;
+
+    let is_zip64 = eocd_pos >= 20 && tail[eocd_pos - 20..eocd_pos - 16] == ZIP64_LOCATOR_SIG;
+
+    let (cd_offset, cd_size) = if is_zip64 {
+        let locator = &tail[eocd_pos - 20..eocd_pos];
+        let z64_off = u64::from_le_bytes(locator[8..16].try_into().unwrap());
+        let rec = if z64_off >= tail_offset {
+            let i = (z64_off - tail_offset) as usize;
+            tail[i..i + 56].to_vec()
+        } else {
+            range_download(client, url, z64_off, 56).await?
+        };
+        (
+            u64::from_le_bytes(rec[48..56].try_into().unwrap()),
+            u64::from_le_bytes(rec[40..48].try_into().unwrap()),
+        )
+    } else {
+        let eocd = &tail[eocd_pos..];
+        (
+            u32::from_le_bytes(eocd[16..20].try_into().unwrap()) as u64,
+            u32::from_le_bytes(eocd[12..16].try_into().unwrap()) as u64,
+        )
+    };
+
+    let cd = if cd_offset >= tail_offset {
+        let i = (cd_offset - tail_offset) as usize;
+        tail[i..i + cd_size as usize].to_vec()
+    } else {
+        range_download(client, url, cd_offset, cd_size).await?
+    };
+    Ok(cd)
+}
+
+#[derive(Debug)]
+struct CdEntry {
+    local_off: u64,
+    compressed_size: u64,
+    compression: u16,
+    name_len: u16,
+}
+
+/// Linear scan of the central directory for an entry by name.
+/// Resolves ZIP64 sentinel fields from the per-entry extra block.
+fn find_cd_entry(cd: &[u8], target: &str) -> Option<CdEntry> {
+    let mut pos = 0usize;
+    while pos + 46 <= cd.len() {
+        if cd[pos..pos + 4] != ZIP_CD_SIG {
+            break;
+        }
+        let comp_method = u16::from_le_bytes(cd[pos + 10..pos + 12].try_into().unwrap());
+        let csize_field = u32::from_le_bytes(cd[pos + 20..pos + 24].try_into().unwrap());
+        let usize_field = u32::from_le_bytes(cd[pos + 24..pos + 28].try_into().unwrap());
+        let name_len = u16::from_le_bytes(cd[pos + 28..pos + 30].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(cd[pos + 30..pos + 32].try_into().unwrap()) as usize;
+        let comment_len = u16::from_le_bytes(cd[pos + 32..pos + 34].try_into().unwrap()) as usize;
+        let local_off_field = u32::from_le_bytes(cd[pos + 42..pos + 46].try_into().unwrap());
+
+        if pos + 46 + name_len > cd.len() {
+            break;
+        }
+        let name = std::str::from_utf8(&cd[pos + 46..pos + 46 + name_len]).unwrap_or("");
+
+        if name == target {
+            let extra = &cd[pos + 46 + name_len..pos + 46 + name_len + extra_len];
+            let (local_off, csize, _usize) =
+                resolve_zip64_fields(local_off_field, csize_field, usize_field, extra);
+            return Some(CdEntry {
+                local_off,
+                compressed_size: csize,
+                compression: comp_method,
+                name_len: name_len as u16,
+            });
+        }
+        pos += 46 + name_len + extra_len + comment_len;
+    }
+    None
+}
+
+/// Download a STORED CD entry's raw bytes. A single optimistic range request
+/// covers LFH + name + extra + payload; a fallback request handles the rare
+/// case where the LFH extra field exceeds `LFH_EXTRA_HEADROOM`.
+async fn download_stored_zip_entry(
+    client: &reqwest::Client,
+    url: &str,
+    cd: &[u8],
+    target: &str,
+) -> Result<Option<Vec<u8>>> {
+    let Some(entry) = find_cd_entry(cd, target) else {
+        return Ok(None);
+    };
+    if entry.compression != 0 {
+        bail!(
+            "{target} entry is compressed (method {}); only STORED is supported",
+            entry.compression
+        );
+    }
+
+    const LFH_EXTRA_HEADROOM: u64 = 1024;
+    let optimistic = 30 + entry.name_len as u64 + LFH_EXTRA_HEADROOM + entry.compressed_size;
+    let buf = range_download(client, url, entry.local_off, optimistic).await?;
+    if buf.len() < 30 {
+        bail!("LFH truncated for {target}");
+    }
+    let n = u16::from_le_bytes(buf[26..28].try_into().unwrap()) as usize;
+    let e = u16::from_le_bytes(buf[28..30].try_into().unwrap()) as usize;
+    let data_off = 30 + n + e;
+    let data_end = data_off + entry.compressed_size as usize;
+
+    if data_end <= buf.len() {
+        return Ok(Some(buf[data_off..data_end].to_vec()));
+    }
+
+    // LFH extra exceeded headroom — fall back to a second range request.
+    let abs_data_off = entry.local_off + data_off as u64;
+    let data = range_download(client, url, abs_data_off, entry.compressed_size).await?;
+    Ok(Some(data))
+}
+
+/// Resolve potential ZIP64 sentinel values in a CD entry by reading the extra field.
+/// The ZIP64 extended-info (tag 0x0001) packs uncompressed size, compressed size, then
+/// local header offset, but only the fields whose 32-bit values are 0xFFFFFFFF are stored.
+fn resolve_zip64_fields(
+    local_off_field: u32,
+    csize_field: u32,
+    usize_field: u32,
+    extra: &[u8],
+) -> (u64, u64, u64) {
+    let mut local_off = local_off_field as u64;
+    let mut csize = csize_field as u64;
+    let mut usize_ = usize_field as u64;
+
+    if usize_field != 0xFFFFFFFF && csize_field != 0xFFFFFFFF && local_off_field != 0xFFFFFFFF {
+        return (local_off, csize, usize_);
+    }
+
+    let mut p = 0;
+    while p + 4 <= extra.len() {
+        let tag = u16::from_le_bytes(extra[p..p + 2].try_into().unwrap());
+        let sz = u16::from_le_bytes(extra[p + 2..p + 4].try_into().unwrap()) as usize;
+        if tag == 0x0001 && p + 4 + sz <= extra.len() {
+            let body = &extra[p + 4..p + 4 + sz];
+            let mut q = 0usize;
+            if usize_field == 0xFFFFFFFF && q + 8 <= body.len() {
+                usize_ = u64::from_le_bytes(body[q..q + 8].try_into().unwrap());
+                q += 8;
+            }
+            if csize_field == 0xFFFFFFFF && q + 8 <= body.len() {
+                csize = u64::from_le_bytes(body[q..q + 8].try_into().unwrap());
+                q += 8;
+            }
+            if local_off_field == 0xFFFFFFFF && q + 8 <= body.len() {
+                local_off = u64::from_le_bytes(body[q..q + 8].try_into().unwrap());
+            }
+            break;
+        }
+        p += 4 + sz;
+    }
+    (local_off, csize, usize_)
 }
 
 fn merge_ranges(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {

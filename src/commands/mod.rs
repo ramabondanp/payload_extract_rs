@@ -1,6 +1,7 @@
 pub mod extract;
 pub mod list;
 pub mod metadata;
+pub mod ota_metadata;
 pub mod verify;
 
 use clap::builder::styling::{AnsiColor, Styles};
@@ -40,4 +41,6 @@ pub enum Commands {
     Verify(verify::VerifyArgs),
     /// Show payload metadata
     Metadata(metadata::MetadataArgs),
+    /// Show OTA package metadata (META-INF/com/android/metadata{,.pb})
+    OtaMetadata(ota_metadata::OtaMetadataArgs),
 }

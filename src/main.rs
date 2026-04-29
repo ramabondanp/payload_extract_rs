@@ -4,6 +4,7 @@ mod commands;
 mod error;
 mod extract;
 mod input;
+mod ota_metadata;
 mod payload;
 mod proto;
 mod style;
@@ -19,6 +20,7 @@ fn main() {
         Commands::List(args) => commands::list::run(args, insecure),
         Commands::Verify(args) => commands::verify::run(args, insecure),
         Commands::Metadata(args) => commands::metadata::run(args, insecure),
+        Commands::OtaMetadata(args) => commands::ota_metadata::run(args, insecure),
     };
 
     if let Err(e) = result {
