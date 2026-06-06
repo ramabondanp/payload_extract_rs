@@ -66,10 +66,11 @@ prost-build = "0.14"
 protoc-bin-vendored = "3"
 
 [features]
-default = ["http-native-tls"]
+default = ["http-rustls"]
 http = ["dep:tokio", "dep:reqwest", "dep:futures"]
 http-native-tls = ["http", "reqwest?/native-tls"]
 http-vendored-tls = ["http", "reqwest?/native-tls-vendored"]
+http-rustls = ["http", "reqwest?/rustls"]
 
 [profile.release]
 opt-level = 3
