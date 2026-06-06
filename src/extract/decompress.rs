@@ -4,51 +4,22 @@ use crate::error::PayloadError;
 
 use super::operation::OpType;
 
-/// Decompress data based on operation type.
-/// For Replace operations, data is not compressed — the caller should
-/// use the zero-copy path instead of calling this function.
-pub fn decompress(op_type: OpType, input: &[u8], output: &mut Vec<u8>) -> Result<(), PayloadError> {
-    match op_type {
-        OpType::Replace => {
-            output.extend_from_slice(input);
-            Ok(())
-        }
-        OpType::ReplaceBz => {
-            let mut decoder = bzip2::read::BzDecoder::new(input);
-            decoder
-                .read_to_end(output)
-                .map_err(|e| PayloadError::DecompressionFailed(format!("bzip2: {e}")))?;
-            Ok(())
-        }
-        OpType::ReplaceXz => {
-            let mut decoder = xz2::read::XzDecoder::new(input);
-            decoder
-                .read_to_end(output)
-                .map_err(|e| PayloadError::DecompressionFailed(format!("xz: {e}")))?;
-            Ok(())
-        }
-        OpType::ReplaceZstd => {
-            let mut decoder = zstd::Decoder::new(input)
-                .map_err(|e| PayloadError::DecompressionFailed(format!("zstd: {e}")))?;
-            decoder
-                .read_to_end(output)
-                .map_err(|e| PayloadError::DecompressionFailed(format!("zstd: {e}")))?;
-            Ok(())
-        }
-        OpType::Zero => {
-            // Caller handles zero-fill at the writer level
-            Ok(())
-        }
-        OpType::Discard
-        | OpType::SourceCopy
-        | OpType::SourceBsdiff
-        | OpType::BrotliBsdiff
-        | OpType::Puffdiff
-        | OpType::Zucchini
-        | OpType::Lz4diffBsdiff
-        | OpType::Lz4diffPuffdiff => {
-            // These are handled directly in the extraction orchestrator
-            Err(PayloadError::UnsupportedOperation(op_type as i32))
-        }
-    }
+/// Create a streaming decoder for a compressed operation blob.
+///
+/// The returned reader yields the decompressed bytes on demand; callers read it
+/// in bounded chunks so peak memory stays constant regardless of the (possibly
+/// multi-gigabyte) decompressed output size. For `Replace` the input is passed
+/// through unchanged (the caller normally uses the zero-copy path instead).
+pub fn decoder_for(op_type: OpType, input: &[u8]) -> Result<Box<dyn Read + '_>, PayloadError> {
+    Ok(match op_type {
+        OpType::Replace => Box::new(input),
+        OpType::ReplaceBz => Box::new(bzip2::read::BzDecoder::new(input)),
+        OpType::ReplaceXz => Box::new(xz2::read::XzDecoder::new(input)),
+        OpType::ReplaceZstd => Box::new(
+            zstd::Decoder::new(input)
+                .map_err(|e| PayloadError::DecompressionFailed(format!("zstd: {e}")))?,
+        ),
+        OpType::Zero => Box::new(std::io::empty()),
+        other => return Err(PayloadError::UnsupportedOperation(other as i32)),
+    })
 }

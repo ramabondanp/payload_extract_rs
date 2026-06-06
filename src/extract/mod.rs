@@ -7,7 +7,9 @@ pub mod verify;
 pub mod verify_update;
 pub mod writer;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +23,17 @@ use crate::style;
 
 use operation::{OpType, OperationTask};
 use writer::PartitionWriter;
+
+/// Size of the per-thread streaming-decompression scratch buffer. Large enough
+/// that a typical (~2 MiB) operation is written in a single pwrite, while keeping
+/// peak memory bounded and independent of the decompressed output size.
+const DECODE_CHUNK_SIZE: usize = 4 << 20; // 4 MiB
+
+thread_local! {
+    /// Reused decode buffer, kept allocated at `DECODE_CHUNK_SIZE` across operations
+    /// so the hot path neither reallocates nor re-zeroes per operation.
+    static DECODE_CHUNK: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
 
 /// Configuration for extraction.
 pub struct ExtractConfig {
@@ -46,6 +59,9 @@ pub fn extract_partitions(
     }
 
     let block_size = payload.block_size();
+    if block_size == 0 || block_size > 16 * 1024 * 1024 {
+        bail!("invalid block size: {block_size}");
+    }
     std::fs::create_dir_all(output_dir)?;
 
     // Check if any partition has delta operations
@@ -322,22 +338,45 @@ fn process_operation(
             )?;
         }
         OpType::ReplaceBz | OpType::ReplaceXz | OpType::ReplaceZstd => {
-            // Compressed full-OTA operations: decompress then write
+            // Compressed full-OTA operation: stream-decode straight to the
+            // destination extents. Peak memory is one CHUNK, independent of the
+            // decompressed output size — no partition-proportional buffer.
             let blob = get_blob(payload, task)?;
 
             if config.verify_ops {
                 verify::verify_sha256(blob, &task.data_sha256)?;
             }
 
-            let expected_size: u64 = task
-                .dst_extents
-                .iter()
-                .map(|&(_, num_blocks)| num_blocks * block_size as u64)
-                .sum();
+            let mut reader = decompress::decoder_for(task.op_type, blob)?;
+            let mut sink = ExtentWriter::new(writer, block_size, &task.dst_extents);
 
-            bufpool::with_buffer(expected_size as usize, |buf| {
-                decompress::decompress(task.op_type, blob, buf)?;
-                write_to_extents(buf, &task.dst_extents, writer, block_size)
+            DECODE_CHUNK.with(|cell| -> Result<()> {
+                let mut buf = cell.borrow_mut();
+                if buf.len() < DECODE_CHUNK_SIZE {
+                    buf.resize(DECODE_CHUNK_SIZE, 0); // one-time allocation per thread
+                }
+                loop {
+                    // Fill the chunk before flushing so writes are batched into
+                    // large pwrites rather than one syscall per decoder read.
+                    let mut filled = 0;
+                    while filled < DECODE_CHUNK_SIZE {
+                        let n = reader
+                            .read(&mut buf[filled..])
+                            .map_err(|e| anyhow::anyhow!("decompression read failed: {e}"))?;
+                        if n == 0 {
+                            break;
+                        }
+                        filled += n;
+                    }
+                    if filled == 0 {
+                        break;
+                    }
+                    sink.write(&buf[..filled])?;
+                    if filled < DECODE_CHUNK_SIZE {
+                        break; // decoder exhausted
+                    }
+                }
+                Ok(())
             })?;
         }
     }
@@ -401,4 +440,136 @@ fn write_to_extents(
         data_offset = end;
     }
     Ok(())
+}
+
+/// Sequentially writes a streamed byte sequence across a partition's destination
+/// extents, mapping the running output position to (extent, in-extent offset).
+///
+/// Equivalent to feeding the full decompressed buffer to [`write_to_extents`], but
+/// fed incrementally so the caller never materializes the whole output in memory.
+/// Bytes beyond the total extent capacity are dropped — matching `write_to_extents`,
+/// which clamps each extent write to `data.len()`.
+struct ExtentWriter<'a> {
+    writer: &'a PartitionWriter,
+    block_size: u64,
+    extents: &'a [(u64, u64)],
+    idx: usize,
+    pos_in_extent: u64,
+}
+
+impl<'a> ExtentWriter<'a> {
+    fn new(writer: &'a PartitionWriter, block_size: u32, extents: &'a [(u64, u64)]) -> Self {
+        Self {
+            writer,
+            block_size: block_size as u64,
+            extents,
+            idx: 0,
+            pos_in_extent: 0,
+        }
+    }
+
+    fn write(&mut self, mut data: &[u8]) -> Result<()> {
+        while !data.is_empty() {
+            // Advance past any extents already filled to capacity.
+            while self.idx < self.extents.len()
+                && self.pos_in_extent >= self.extents[self.idx].1 * self.block_size
+            {
+                self.idx += 1;
+                self.pos_in_extent = 0;
+            }
+            if self.idx >= self.extents.len() {
+                break; // output exceeds extent capacity; drop the remainder
+            }
+            let (start_block, num_blocks) = self.extents[self.idx];
+            let remaining = num_blocks * self.block_size - self.pos_in_extent;
+            let n = (data.len() as u64).min(remaining) as usize;
+            let offset = start_block * self.block_size + self.pos_in_extent;
+            self.writer.write_at(&data[..n], offset)?;
+            self.pos_in_extent += n as u64;
+            data = &data[n..];
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    /// Streaming across extents in awkward chunk sizes must produce byte-identical
+    /// output to the original whole-buffer `write_to_extents`.
+    #[test]
+    fn extent_writer_equiv() {
+        let bs = 4096u32;
+        let extents = vec![(2u64, 3u64), (10, 1), (20, 2)]; // non-contiguous
+        let total = (3 + 1 + 2) * bs as usize;
+        let data: Vec<u8> = (0..total).map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8).collect();
+
+        let dir = std::env::temp_dir();
+        let pa = dir.join("pe_ew_a.img");
+        let pb = dir.join("pe_ew_b.img");
+        let _ = std::fs::remove_file(&pa);
+        let _ = std::fs::remove_file(&pb);
+        let cap = 24 * bs as u64;
+
+        let wa = PartitionWriter::new(&pa, cap, bs).unwrap();
+        write_to_extents(&data, &extents, &wa, bs).unwrap();
+        drop(wa);
+
+        let wb = PartitionWriter::new(&pb, cap, bs).unwrap();
+        {
+            let mut ew = ExtentWriter::new(&wb, bs, &extents);
+            let mut off = 0;
+            for &chunk in [1usize, 4095, 1, 8192, 100000, 33].iter().cycle() {
+                if off >= data.len() {
+                    break;
+                }
+                let end = (off + chunk).min(data.len());
+                ew.write(&data[off..end]).unwrap();
+                off = end;
+            }
+        }
+        drop(wb);
+
+        assert_eq!(std::fs::read(&pa).unwrap(), std::fs::read(&pb).unwrap());
+        let _ = std::fs::remove_file(&pa);
+        let _ = std::fs::remove_file(&pb);
+    }
+
+    /// The streaming decoder must reproduce the original bytes for every codec,
+    /// even when read in tiny chunks (covers zstd, which the test package lacks).
+    #[test]
+    fn decoder_for_streams_all_codecs() {
+        let data: Vec<u8> = (0..200_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+
+        let z = zstd::stream::encode_all(&data[..], 3).unwrap();
+        let mut x = Vec::new();
+        xz2::read::XzEncoder::new(&data[..], 6)
+            .read_to_end(&mut x)
+            .unwrap();
+        let mut b = Vec::new();
+        bzip2::read::BzEncoder::new(&data[..], bzip2::Compression::new(6))
+            .read_to_end(&mut b)
+            .unwrap();
+
+        for (ot, comp) in [
+            (OpType::ReplaceZstd, &z),
+            (OpType::ReplaceXz, &x),
+            (OpType::ReplaceBz, &b),
+        ] {
+            let mut reader = decompress::decoder_for(ot, comp).unwrap();
+            let mut out = Vec::new();
+            let mut buf = [0u8; 7]; // tiny chunks stress the streaming loop
+            loop {
+                let n = reader.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..n]);
+            }
+            assert_eq!(out, data, "codec {ot:?} roundtrip mismatch");
+        }
+    }
 }

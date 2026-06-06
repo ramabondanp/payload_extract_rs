@@ -23,27 +23,49 @@ fn align_up(value: u64, alignment: u64) -> u64 {
     value.div_ceil(alignment) * alignment
 }
 
-/// A single level of the dm-verity hash tree.
-struct Level {
-    /// Number of blocks at this level (each block holds block_size/32 hashes).
-    block_count: u64,
-    /// Padded to block_size boundary.
-    total_hash_size: u64,
-    /// Hash data buffer (padded with zeros).
-    data: Vec<u8>,
+/// Positional read (pread / seek_read). Returns the number of bytes read.
+#[inline]
+fn pread(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.read_at(buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        file.seek_read(buf, offset)
+    }
 }
 
-impl Level {
-    fn new(target_size: u64, block_size: u64) -> Self {
-        let block_count = target_size / block_size;
-        let total_hash_size = align_up(block_count * SHA256_DIGEST_SIZE as u64, block_size);
-        let data = vec![0u8; total_hash_size as usize];
-        Self {
-            block_count,
-            total_hash_size,
-            data,
+/// Fill `buf` completely starting at `offset`, looping over short reads.
+fn pread_exact(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    let mut done = 0;
+    while done < buf.len() {
+        let n = pread(file, &mut buf[done..], offset + done as u64)?;
+        if n == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
         }
+        done += n;
     }
+    Ok(())
+}
+
+/// Zero `buf`, then read up to `buf.len()` bytes at `offset` clamped to `file_len`
+/// (bytes past EOF stay zero). Returns the count of real bytes read.
+fn read_clamped(
+    file: &std::fs::File,
+    buf: &mut [u8],
+    offset: u64,
+    file_len: u64,
+) -> Result<usize> {
+    buf.fill(0);
+    if offset >= file_len {
+        return Ok(0);
+    }
+    let want = (buf.len() as u64).min(file_len - offset) as usize;
+    pread_exact(file, &mut buf[..want], offset)?;
+    Ok(want)
 }
 
 /// Compute the dm-verity hash tree and write it into the partition image.
@@ -70,108 +92,121 @@ pub fn compute_and_write_hash_tree(
         bail!("unsupported hash tree algorithm: '{algorithm}'");
     }
 
+    if block_size == 0 {
+        bail!("invalid block size: 0");
+    }
     let bs = block_size as u64;
     let data_extent_offset = hash_tree_data_extent.start_block.unwrap_or(0) * bs;
     let data_extent_size = hash_tree_data_extent.num_blocks.unwrap_or(0) * bs;
     let hash_tree_offset = hash_tree_extent.start_block.unwrap_or(0) * bs;
 
-    // Memory-map the partition file for reading data blocks
-    let file = std::fs::File::open(output_path)
-        .with_context(|| format!("failed to open '{}' for hash tree", output_path.display()))?;
-    let mmap = unsafe { memmap2::Mmap::map(&file) }
-        .with_context(|| format!("failed to mmap '{}'", output_path.display()))?;
-    let partition_data = &mmap[..];
-
-    // Build level hierarchy
-    // Top level: one hash per data block
-    let mut top_level = Level::new(data_extent_size, bs);
-
-    // Compute top level hashes in parallel: SHA256(salt || data_block)
-    top_level
-        .data
-        .par_chunks_mut(SHA256_DIGEST_SIZE)
-        .enumerate()
-        .take(top_level.block_count as usize)
-        .for_each(|(i, hash_slot)| {
-            let offset = data_extent_offset as usize + i * block_size as usize;
-            let end = (offset + block_size as usize).min(partition_data.len());
-            let block_data = &partition_data[offset..end];
-
-            let mut hasher = Sha256::new();
-            hasher.update(salt);
-            hasher.update(block_data);
-            hash_slot.copy_from_slice(&hasher.finalize());
-        });
-
-    // Build intermediate levels until block_count == 1 (the root level).
-    let mut levels: Vec<Level> = Vec::new();
-    let mut prev_hash_size = top_level.total_hash_size;
-    let mut prev_hash_data: &[u8] = &top_level.data;
-
-    let compute_level = |prev_data: &[u8], prev_size: u64, salt: &[u8], block_size: usize| {
-        let bs = block_size as u64;
-        let salt_len = salt.len();
-        let mut level = Level::new(prev_size, bs);
-        let mut salt_buf = vec![0u8; salt_len + block_size];
-        salt_buf[..salt_len].copy_from_slice(salt);
-
-        let mut write_pos = 0usize;
-        let mut read_pos = 0usize;
-        while read_pos < prev_size as usize {
-            let end = (read_pos + block_size).min(prev_data.len());
-            salt_buf[salt_len..salt_len + (end - read_pos)]
-                .copy_from_slice(&prev_data[read_pos..end]);
-            // Zero-fill if short
-            for b in &mut salt_buf[salt_len + (end - read_pos)..salt_len + block_size] {
-                *b = 0;
-            }
-
-            let hash = Sha256::digest(&salt_buf[..salt_len + block_size]);
-            level.data[write_pos..write_pos + SHA256_DIGEST_SIZE].copy_from_slice(hash.as_slice());
-
-            read_pos += block_size;
-            write_pos += SHA256_DIGEST_SIZE;
-        }
-        level
-    };
-
-    while prev_hash_size > bs {
-        let level = compute_level(prev_hash_data, prev_hash_size, salt, block_size as usize);
-        prev_hash_size = level.total_hash_size;
-        levels.push(level);
-        prev_hash_data = &levels.last().unwrap().data;
+    if data_extent_size == 0 {
+        return Ok(false);
     }
 
-    // Compute root level (block_count == 1) and pop it from the write list,
-    // matching the C++ reference which saves it for potential verification use.
-    let _root_level = levels
-        .last()
-        .map(|last| compute_level(&last.data, last.total_hash_size, salt, block_size as usize));
-
-    // Arrange levels for write-back:
-    // Reverse intermediate levels (deepest first), then append the top (leaf) level
-    levels.reverse();
-    levels.push(top_level);
-
-    // Write all levels to the output file at hash_tree_offset
-    let out_file = std::fs::OpenOptions::new()
+    // A single read+write handle. Every read (pread) and write (pwrite) uses an
+    // explicit offset, so the computation never holds more than a small bounded
+    // buffer regardless of partition size — the leaf level is streamed to disk
+    // and the (tiny) intermediate levels are read back from disk on demand.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .open(output_path)
-        .with_context(|| {
-            format!(
-                "failed to open '{}' for hash tree write",
-                output_path.display()
-            )
+        .with_context(|| format!("failed to open '{}' for hash tree", output_path.display()))?;
+    let file_len = file.metadata()?.len();
+
+    // --- Level layout (pure arithmetic, no data needed) ---
+    // Leaf level: one hash per data block, padded up to a block boundary.
+    let leaf_block_count = data_extent_size / bs;
+    let leaf_size = align_up(leaf_block_count * SHA256_DIGEST_SIZE as u64, bs);
+
+    // Intermediate levels (build order, nearest-leaf first) until size == bs (root).
+    let mut inter_sizes: Vec<u64> = Vec::new();
+    let mut prev_size = leaf_size;
+    while prev_size > bs {
+        let bc = prev_size / bs;
+        inter_sizes.push(align_up(bc * SHA256_DIGEST_SIZE as u64, bs));
+        prev_size = *inter_sizes.last().unwrap();
+    }
+
+    // Write-back order matches the reference: intermediate levels deepest-first,
+    // then the leaf level last. Resolve each level's absolute file offset.
+    let inter_total: u64 = inter_sizes.iter().sum();
+    let leaf_offset = hash_tree_offset + inter_total;
+    let inter_offsets: Vec<u64> = {
+        let mut offs = vec![0u64; inter_sizes.len()];
+        let mut acc = hash_tree_offset;
+        for i in (0..inter_sizes.len()).rev() {
+            offs[i] = acc;
+            acc += inter_sizes[i];
+        }
+        offs
+    };
+
+    // --- Stream the leaf level straight to disk (bounded per-thread buffers) ---
+    // The leaf is the only partition-proportional level; everything above is <1%.
+    const GROUP_SLOTS: u64 = 8192; // 8192 hashes -> 256 KiB pwrite per group
+    let total_slots = leaf_size / SHA256_DIGEST_SIZE as u64;
+    let group_count = total_slots.div_ceil(GROUP_SLOTS);
+
+    (0..group_count)
+        .into_par_iter()
+        .try_for_each(|g| -> Result<()> {
+            let slot_start = g * GROUP_SLOTS;
+            let slot_end = (slot_start + GROUP_SLOTS).min(total_slots);
+            let mut out = vec![0u8; ((slot_end - slot_start) as usize) * SHA256_DIGEST_SIZE];
+            let mut block = vec![0u8; bs as usize];
+
+            for slot in slot_start..slot_end {
+                // Slots >= leaf_block_count are zero padding (already zero in `out`).
+                if slot < leaf_block_count {
+                    let n = read_clamped(&file, &mut block, data_extent_offset + slot * bs, file_len)?;
+                    let mut hasher = Sha256::new();
+                    hasher.update(salt);
+                    hasher.update(&block[..n]);
+                    let dst = ((slot - slot_start) as usize) * SHA256_DIGEST_SIZE;
+                    out[dst..dst + SHA256_DIGEST_SIZE].copy_from_slice(&hasher.finalize());
+                }
+            }
+            write_at_offset(&file, &out, leaf_offset + slot_start * SHA256_DIGEST_SIZE as u64)?;
+            Ok(())
         })?;
 
-    let mut write_offset = hash_tree_offset;
-    for level in &levels {
-        write_at_offset(
-            &out_file,
-            &level.data[..level.total_hash_size as usize],
-            write_offset,
-        )?;
-        write_offset += level.total_hash_size;
+    // --- Intermediate levels: small, computed serially and written to disk ---
+    // Level 0 reads the just-written leaf from disk; higher levels read the
+    // previous (small) level kept in memory. `scratch` materializes the previous
+    // block from either source so the hashing logic is identical to the reference.
+    let salt_len = salt.len();
+    let mut prev_mem: Option<Vec<u8>> = None;
+    for (i, &level_size) in inter_sizes.iter().enumerate() {
+        let prev_len = prev_mem.as_ref().map(|b| b.len() as u64).unwrap_or(leaf_size);
+        let level_block_count = prev_len / bs;
+        let mut level = vec![0u8; level_size as usize];
+        let mut salt_buf = vec![0u8; salt_len + bs as usize];
+        salt_buf[..salt_len].copy_from_slice(salt);
+        let mut scratch = vec![0u8; bs as usize];
+
+        for b in 0..level_block_count {
+            let pblen = match &prev_mem {
+                Some(buf) => {
+                    let s = (b * bs) as usize;
+                    let e = (s + bs as usize).min(buf.len());
+                    scratch[..e - s].copy_from_slice(&buf[s..e]);
+                    e - s
+                }
+                None => read_clamped(&file, &mut scratch, leaf_offset + b * bs, file_len)?,
+            };
+            salt_buf[salt_len..salt_len + pblen].copy_from_slice(&scratch[..pblen]);
+            for x in &mut salt_buf[salt_len + pblen..salt_len + bs as usize] {
+                *x = 0;
+            }
+            let h = Sha256::digest(&salt_buf[..salt_len + bs as usize]);
+            let dst = (b * SHA256_DIGEST_SIZE as u64) as usize;
+            level[dst..dst + SHA256_DIGEST_SIZE].copy_from_slice(&h);
+        }
+
+        write_at_offset(&file, &level, inter_offsets[i])?;
+        prev_mem = Some(level);
     }
 
     Ok(true)
@@ -195,8 +230,16 @@ pub fn compute_and_write_fec(
         None => return Ok(false),
     };
 
+    if block_size == 0 {
+        bail!("invalid block size: 0");
+    }
     let bs = block_size as u64;
     let fec_roots = partition.fec_roots.unwrap_or(2);
+    // Validate before constructing the RS encoder so untrusted metadata can never
+    // trip an assertion (which, under panic=abort, would abort the whole process).
+    if fec_roots == 0 || fec_roots >= FEC_RSM {
+        bail!("invalid fec_roots: {fec_roots} (must be in 1..{FEC_RSM})");
+    }
     let fec_rsn = FEC_RSM - fec_roots;
 
     let fec_data_extent_offset = fec_data_extent.start_block.unwrap_or(0) * bs;
@@ -213,77 +256,63 @@ pub fn compute_and_write_fec(
             fec_data_size
         );
     }
+    if fec_data_extent_size == 0 {
+        return Ok(false);
+    }
 
     let rounds = (fec_data_extent_size / bs).div_ceil(fec_rsn as u64);
 
-    // Memory-map partition for reading
-    let file = std::fs::File::open(output_path)
-        .with_context(|| format!("failed to open '{}' for FEC", output_path.display()))?;
-    let mmap = unsafe { memmap2::Mmap::map(&file) }
-        .with_context(|| format!("failed to mmap '{}'", output_path.display()))?;
-    let partition_data = &mmap[..];
-
-    // Allocate FEC output buffer
-    let mut fec_output = vec![0u8; fec_data_size as usize];
-
-    // Process each round in parallel
-    let chunk_size = block_size as usize * fec_roots as usize;
-    fec_output
-        .par_chunks_mut(chunk_size)
-        .enumerate()
-        .take(rounds as usize)
-        .for_each(|(round_idx, fec_chunk)| {
-            let rs = RsEncoder::new(fec_roots as usize);
-            let mut buffer = vec![0u8; block_size as usize];
-            let rs_block_size = block_size as usize * fec_rsn as usize;
-            let mut rs_blocks = vec![0u8; rs_block_size];
-
-            // Construct RS blocks from interleaved data
-            for j in 0..fec_rsn as usize {
-                let offset = fec::fec_ecc_interleave(
-                    round_idx as u64 * fec_rsn as u64 * bs + j as u64,
-                    fec_rsn,
-                    rounds,
-                );
-
-                buffer.fill(0);
-                if offset < fec_data_extent_size {
-                    let src_offset = fec_data_extent_offset + offset;
-                    let src_end = (src_offset + block_size as u64).min(partition_data.len() as u64);
-                    if src_offset < partition_data.len() as u64 {
-                        let len = (src_end - src_offset) as usize;
-                        buffer[..len].copy_from_slice(
-                            &partition_data[src_offset as usize..src_end as usize],
-                        );
-                    }
-                }
-
-                // Place into RS block: rsBlocks[col * rsn + row] = buffer[col]
-                for k in 0..block_size as usize {
-                    rs_blocks[k * fec_rsn as usize + j] = buffer[k];
-                }
-            }
-
-            // Encode each byte column
-            for j in 0..block_size as usize {
-                let data_start = j * fec_rsn as usize;
-                let data_slice = &rs_blocks[data_start..data_start + fec_rsn as usize];
-                let parity_start = j * fec_roots as usize;
-                let parity_end = parity_start + fec_roots as usize;
-                rs.encode(data_slice, &mut fec_chunk[parity_start..parity_end]);
-            }
-        });
-
-    // Write FEC data to output file
-    drop(mmap);
-    drop(file);
-
-    let out_file = std::fs::OpenOptions::new()
+    // Single read+write handle; reads/writes use explicit offsets (pread/pwrite).
+    let file = std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .open(output_path)
-        .with_context(|| format!("failed to open '{}' for FEC write", output_path.display()))?;
+        .with_context(|| format!("failed to open '{}' for FEC", output_path.display()))?;
+    let file_len = file.metadata()?.len();
 
-    write_at_offset(&out_file, &fec_output, fec_write_offset)?;
+    let chunk_size = block_size as usize * fec_roots as usize;
+
+    // Each round produces an independent, contiguous `chunk_size` slice of parity
+    // and is written straight to disk — no partition-proportional accumulator.
+    (0..rounds).into_par_iter().try_for_each(|round_idx| -> Result<()> {
+        let rs = RsEncoder::try_new(fec_roots as usize).map_err(|e| anyhow::anyhow!(e))?;
+        let mut block = vec![0u8; block_size as usize];
+        let rs_block_size = block_size as usize * fec_rsn as usize;
+        let mut rs_blocks = vec![0u8; rs_block_size];
+        let mut parity = vec![0u8; chunk_size];
+
+        // Construct RS blocks from interleaved data
+        for j in 0..fec_rsn as usize {
+            let offset = fec::fec_ecc_interleave(
+                round_idx * fec_rsn as u64 * bs + j as u64,
+                fec_rsn,
+                rounds,
+            );
+
+            if offset < fec_data_extent_size {
+                read_clamped(&file, &mut block, fec_data_extent_offset + offset, file_len)?;
+            } else {
+                block.fill(0);
+            }
+
+            // Place into RS block: rsBlocks[col * rsn + row] = block[col]
+            for k in 0..block_size as usize {
+                rs_blocks[k * fec_rsn as usize + j] = block[k];
+            }
+        }
+
+        // Encode each byte column
+        for j in 0..block_size as usize {
+            let data_start = j * fec_rsn as usize;
+            let data_slice = &rs_blocks[data_start..data_start + fec_rsn as usize];
+            let parity_start = j * fec_roots as usize;
+            let parity_end = parity_start + fec_roots as usize;
+            rs.encode(data_slice, &mut parity[parity_start..parity_end]);
+        }
+
+        write_at_offset(&file, &parity, fec_write_offset + round_idx * chunk_size as u64)?;
+        Ok(())
+    })?;
 
     Ok(true)
 }
@@ -296,6 +325,10 @@ pub fn verify_update_partitions(
     threads: usize,
     quiet: bool,
 ) -> Result<()> {
+    if block_size == 0 || block_size > 16 * 1024 * 1024 {
+        bail!("invalid block size: {block_size}");
+    }
+
     let thread_count = if threads == 0 {
         num_cpus::get()
     } else {

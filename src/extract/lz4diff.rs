@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use prost::Message;
 use sha2::{Digest, Sha256};
 
+use crate::extract::bufpool;
 use crate::proto::{CompressedBlockInfo, Lz4diffHeader, compression_algorithm};
 use crate::style;
 
@@ -141,7 +142,9 @@ fn decompress_blob(
         );
     }
 
-    let mut output = Vec::with_capacity(total_uncompressed as usize);
+    // Fallible allocation: a corrupt block_info declaring gigabytes must surface
+    // as an error, not an allocation-failure abort.
+    let mut output = bufpool::try_alloc_capacity(total_uncompressed as usize)?;
     let mut compressed_offset: usize = 0;
 
     for block in blocks {
@@ -192,11 +195,17 @@ fn compress_blob(
     }
 
     let total_compressed: u64 = blocks.iter().map(|b| b.compressed_length).sum();
-    let mut output = Vec::with_capacity(total_compressed as usize);
+    let mut output = bufpool::try_alloc_capacity(total_compressed as usize)?;
 
     for block in blocks {
         let block_start = block.uncompressed_offset as usize;
         let block_end = block_start + block.uncompressed_length as usize;
+        if block_end > data.len() {
+            bail!(
+                "LZ4DIFF block out of bounds: [{block_start}..{block_end}) exceeds {} bytes",
+                data.len()
+            );
+        }
         let uncompressed_block = &data[block_start..block_end];
 
         if !is_compressed(block) {
@@ -228,8 +237,8 @@ fn compress_blob(
             );
         }
 
-        // Build output block with correct target size
-        let mut block_buf = vec![0u8; target_size];
+        // Build output block with correct target size (fallible allocation).
+        let mut block_buf = bufpool::try_alloc_zeroed(target_size)?;
         let bytes_written = compressed.len().min(target_size);
 
         if bytes_written < target_size {

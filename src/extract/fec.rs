@@ -29,6 +29,17 @@ fn modnn(x: usize) -> usize {
 // than iterator chains for this use case.
 #[allow(clippy::needless_range_loop, clippy::explicit_counter_loop)]
 impl RsEncoder {
+    /// Create a new RS encoder, returning an error if `nroots` is out of range
+    /// instead of panicking. Use this on any path that handles untrusted input.
+    pub fn try_new(nroots: usize) -> Result<Self, String> {
+        if nroots == 0 || nroots >= NN {
+            return Err(format!(
+                "invalid Reed-Solomon roots: {nroots} (must be in 1..{NN})"
+            ));
+        }
+        Ok(Self::new(nroots))
+    }
+
     /// Create a new RS encoder with the given number of roots (parity symbols).
     pub fn new(nroots: usize) -> Self {
         assert!(nroots > 0 && nroots < NN);
