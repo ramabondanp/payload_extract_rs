@@ -80,51 +80,80 @@ pub fn verify_hash_tree(
         return Ok(false);
     }
 
-    // Compute leaf-level hashes (hash of each data block with salt)
-    let mut level_hashes: Vec<Vec<u8>> = Vec::new();
-    for block_idx in 0..data_blocks {
-        let offset = (data_start + block_idx * block_size as u64) as usize;
-        let end = offset + block_size as usize;
-        let block_data = &partition_data[offset..end];
-
-        let mut hasher = Sha256::new();
-        hasher.update(salt);
-        hasher.update(block_data);
-        level_hashes.push(hasher.finalize().to_vec());
+    // Align helper
+    #[inline]
+    fn align_up(value: u64, alignment: u64) -> u64 {
+        value.div_ceil(alignment) * alignment
     }
 
-    // Build tree levels until we reach a single root hash
-    while level_hashes.len() > 1 {
-        let hash_size = 32; // SHA256
-        let hashes_per_block = block_size as usize / hash_size;
-        let mut next_level = Vec::new();
+    // Reconstruct top level (leaf hashes of data blocks)
+    let mut current_level_data = vec![0u8; align_up(data_blocks * 32, block_size as u64) as usize];
+    use rayon::prelude::*;
+    current_level_data
+        .par_chunks_mut(32)
+        .enumerate()
+        .take(data_blocks as usize)
+        .for_each(|(block_idx, hash_slot)| {
+            let offset = (data_start + block_idx as u64 * block_size as u64) as usize;
+            let end = offset + block_size as usize;
+            let block_data = &partition_data[offset..end];
 
-        for chunk in level_hashes.chunks(hashes_per_block) {
             let mut hasher = Sha256::new();
             hasher.update(salt);
-            for h in chunk {
-                hasher.update(h);
-            }
-            // Pad with zeros if chunk is smaller than hashes_per_block
-            for _ in chunk.len()..hashes_per_block {
-                hasher.update([0u8; 32]);
-            }
-            next_level.push(hasher.finalize().to_vec());
-        }
+            hasher.update(block_data);
+            hash_slot.copy_from_slice(&hasher.finalize());
+        });
 
-        level_hashes = next_level;
+    let mut reconstructed_tree_data = Vec::new();
+    let mut levels = Vec::new();
+    let mut prev_hash_size = current_level_data.len() as u64;
+    let mut prev_hash_data = current_level_data.clone();
+
+    while prev_hash_size > block_size as u64 {
+        // Compute next level up
+        let mut next_level_data = vec![
+            0u8;
+            align_up(
+                (prev_hash_size / block_size as u64) * 32,
+                block_size as u64
+            ) as usize
+        ];
+        let mut write_pos = 0usize;
+        let mut read_pos = 0usize;
+        let mut chunk_to_hash = vec![0u8; salt.len() + block_size as usize];
+        chunk_to_hash[..salt.len()].copy_from_slice(salt);
+
+        while read_pos < prev_hash_size as usize {
+            let end = (read_pos + block_size as usize).min(prev_hash_data.len());
+            let len = end - read_pos;
+            chunk_to_hash[salt.len()..salt.len() + len]
+                .copy_from_slice(&prev_hash_data[read_pos..end]);
+            // Zero-fill if short
+            chunk_to_hash[salt.len() + len..].fill(0);
+
+            let hash = Sha256::digest(&chunk_to_hash);
+            next_level_data[write_pos..write_pos + 32].copy_from_slice(hash.as_slice());
+
+            read_pos += block_size as usize;
+            write_pos += 32;
+        }
+        prev_hash_size = next_level_data.len() as u64;
+        prev_hash_data = next_level_data;
+        levels.push(prev_hash_data.clone());
     }
+
+    levels.reverse();
+    for lvl in levels {
+        reconstructed_tree_data.extend_from_slice(&lvl);
+    }
+    reconstructed_tree_data.extend_from_slice(&current_level_data);
 
     // Compare computed hash tree with stored hash tree
     let stored_tree = &partition_data[tree_start as usize..tree_end as usize];
-    if level_hashes.len() == 1 {
-        // Root hash is the first 32 bytes of the stored tree
-        if stored_tree.len() >= 32 {
-            return Ok(level_hashes[0] == stored_tree[..32]);
-        }
+    if stored_tree.len() < reconstructed_tree_data.len() {
+        return Ok(false);
     }
-
-    Ok(true)
+    Ok(reconstructed_tree_data == stored_tree[..reconstructed_tree_data.len()])
 }
 
 /// Verify Forward Error Correction (FEC) data for a partition.
@@ -145,24 +174,73 @@ pub fn verify_fec(
         None => return Ok(true),
     };
 
-    // Full Reed-Solomon FEC verification is not yet implemented;
-    // only basic integrity check (non-zero FEC region) is performed.
-    let _fec_roots = partition.fec_roots.unwrap_or(2);
+    let bs = block_size as u64;
+    let fec_roots = partition.fec_roots.unwrap_or(2);
+    let fec_rsn = crate::extract::fec::FEC_RSM - fec_roots;
 
-    // Verify FEC extents are within bounds
-    let fec_data_start = fec_data_extent.start_block.unwrap_or(0) * block_size as u64;
-    let fec_data_end = fec_data_start + fec_data_extent.num_blocks.unwrap_or(0) * block_size as u64;
-    let fec_start = fec_extent.start_block.unwrap_or(0) * block_size as u64;
-    let fec_end = fec_start + fec_extent.num_blocks.unwrap_or(0) * block_size as u64;
+    let fec_data_extent_offset = fec_data_extent.start_block.unwrap_or(0) * bs;
+    let fec_data_extent_size = fec_data_extent.num_blocks.unwrap_or(0) * bs;
+    let fec_start = fec_extent.start_block.unwrap_or(0) * bs;
+    let fec_end = fec_start + fec_extent.num_blocks.unwrap_or(0) * bs;
+    let fec_extent_size = fec_extent.num_blocks.unwrap_or(0) * bs;
+    let fec_data_size = crate::extract::fec::fec_ecc_get_data_size(fec_data_extent_size, fec_roots);
 
-    if fec_data_end as usize > partition_data.len() || fec_end as usize > partition_data.len() {
+    if fec_extent_size != fec_data_size {
         return Ok(false);
     }
 
-    // Basic integrity check: FEC data region exists and is non-empty
-    let fec_data_region = &partition_data[fec_start as usize..fec_end as usize];
-    let all_zeros = fec_data_region.iter().all(|&b| b == 0);
+    if fec_end as usize > partition_data.len() {
+        return Ok(false);
+    }
 
-    // If FEC data is all zeros, it's likely not populated
-    Ok(!all_zeros || fec_data_region.is_empty())
+    let rounds = (fec_data_extent_size / bs).div_ceil(fec_rsn as u64);
+    let mut fec_computed = vec![0u8; fec_data_size as usize];
+
+    use rayon::prelude::*;
+    let chunk_size = block_size as usize * fec_roots as usize;
+    fec_computed
+        .par_chunks_mut(chunk_size)
+        .enumerate()
+        .take(rounds as usize)
+        .for_each(|(round_idx, fec_chunk)| {
+            let rs = crate::extract::fec::RsEncoder::new(fec_roots as usize);
+            let mut buffer = vec![0u8; block_size as usize];
+            let rs_block_size = block_size as usize * fec_rsn as usize;
+            let mut rs_blocks = vec![0u8; rs_block_size];
+
+            for j in 0..fec_rsn as usize {
+                let offset = crate::extract::fec::fec_ecc_interleave(
+                    round_idx as u64 * fec_rsn as u64 * bs + j as u64,
+                    fec_rsn,
+                    rounds,
+                );
+
+                buffer.fill(0);
+                if offset < fec_data_extent_size {
+                    let src_offset = fec_data_extent_offset + offset;
+                    let src_end = (src_offset + block_size as u64).min(partition_data.len() as u64);
+                    if src_offset < partition_data.len() as u64 {
+                        let len = (src_end - src_offset) as usize;
+                        buffer[..len].copy_from_slice(
+                            &partition_data[src_offset as usize..src_end as usize],
+                        );
+                    }
+                }
+
+                for k in 0..block_size as usize {
+                    rs_blocks[k * fec_rsn as usize + j] = buffer[k];
+                }
+            }
+
+            for j in 0..block_size as usize {
+                let data_start = j * fec_rsn as usize;
+                let data_slice = &rs_blocks[data_start..data_start + fec_rsn as usize];
+                let parity_start = j * fec_roots as usize;
+                let parity_end = parity_start + fec_roots as usize;
+                rs.encode(data_slice, &mut fec_chunk[parity_start..parity_end]);
+            }
+        });
+
+    let stored_fec = &partition_data[fec_start as usize..fec_end as usize];
+    Ok(fec_computed == stored_fec)
 }

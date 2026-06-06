@@ -142,7 +142,12 @@ fn build_partition_list(
     exclude: Option<&[String]>,
 ) -> Vec<String> {
     match (include, exclude) {
-        (Some(inc), _) => inc.to_vec(),
+        (Some(inc), Some(exc)) => inc
+            .iter()
+            .filter(|name| !exc.iter().any(|e| e == *name))
+            .cloned()
+            .collect(),
+        (Some(inc), None) => inc.to_vec(),
         (None, Some(exc)) => payload
             .partitions()
             .iter()
