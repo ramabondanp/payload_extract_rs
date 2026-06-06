@@ -360,12 +360,10 @@ pub fn verify_update_partitions(
                     style::elog_ok("HASH", name);
                 }
 
-                // FEC (only if hash tree succeeded)
-                if ht_result {
-                    let fec_result = compute_and_write_fec(partition, &output_path, block_size)?;
-                    if fec_result && !quiet {
-                        style::elog_ok("FEC", name);
-                    }
+                // FEC (independent of hash tree)
+                let fec_result = compute_and_write_fec(partition, &output_path, block_size)?;
+                if fec_result && !quiet {
+                    style::elog_ok("FEC", name);
                 }
 
                 Ok(())
