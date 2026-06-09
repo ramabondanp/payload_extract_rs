@@ -51,6 +51,7 @@ indicatif = { version = "0.18", default-features = false, features = ["rayon"] }
 console = "0.16"
 
 # Utilities
+chrono = "0.4"
 hex = { version = "0.4", default-features = false, features = ["std"] }
 num_cpus = "1"
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
