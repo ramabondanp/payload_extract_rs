@@ -2,12 +2,27 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 
 use crate::extract::{self, ExtractConfig};
 use crate::input;
 use crate::style;
+
+/// Reject partition names that could escape the output directory via path traversal.
+fn validate_partition_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains(':')
+        || name == "."
+        || name.starts_with('/')
+    {
+        bail!("unsafe partition name: '{name}'");
+    }
+    Ok(())
+}
 
 #[derive(Args)]
 pub struct ExtractArgs {
@@ -84,12 +99,20 @@ pub fn run(args: ExtractArgs, insecure: bool) -> Result<()> {
         );
     }
 
+    // Validate partition names before using them as path components
+    for name in &pre_partition_names {
+        validate_partition_name(name)?;
+    }
+
     // Build final partition name list with include/exclude logic
     let partition_names = build_partition_list(
         &payload,
         args.partitions.as_deref(),
         args.exclude.as_deref(),
     );
+    for name in &partition_names {
+        validate_partition_name(name)?;
+    }
 
     let config = ExtractConfig {
         verify_ops: args.verify,

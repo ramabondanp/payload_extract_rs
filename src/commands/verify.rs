@@ -1,13 +1,28 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Args;
 use rayon::prelude::*;
 
 use crate::extract::verify::{verify_fec, verify_hash_tree, verify_partition};
 use crate::input;
 use crate::style;
+
+/// Reject partition names that could escape the output directory via path traversal.
+fn validate_partition_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains(':')
+        || name == "."
+        || name.starts_with('/')
+    {
+        bail!("unsafe partition name: '{name}'");
+    }
+    Ok(())
+}
 
 #[derive(Args)]
 pub struct VerifyArgs {
@@ -37,6 +52,9 @@ pub fn run(args: VerifyArgs, insecure: bool) -> Result<()> {
     let block_size = payload.block_size();
 
     let partition_names = args.partitions.unwrap_or_default();
+    for name in &partition_names {
+        validate_partition_name(name)?;
+    }
     let partitions = payload.selected_partitions(&partition_names);
 
     println!(
