@@ -69,6 +69,14 @@ pub fn verify_hash_tree(
     // Calculate data range covered by hash tree
     let data_start = hash_tree_data_extent.start_block.unwrap_or(0) * block_size as u64;
     let data_blocks = hash_tree_data_extent.num_blocks.unwrap_or(0);
+    // Reject unreasonably large hash trees from untrusted protobuf input.
+    // 128M blocks * 4096 bytes = 512 GB, far beyond any realistic Android partition.
+    const MAX_HASH_TREE_BLOCKS: u64 = 128 * 1024 * 1024;
+    if data_blocks > MAX_HASH_TREE_BLOCKS {
+        anyhow::bail!(
+            "hash tree data blocks ({data_blocks}) exceeds maximum ({MAX_HASH_TREE_BLOCKS})"
+        );
+    }
     let data_end = data_start + data_blocks * block_size as u64;
 
     // Hash tree storage location
@@ -176,6 +184,9 @@ pub fn verify_fec(
 
     let bs = block_size as u64;
     let fec_roots = partition.fec_roots.unwrap_or(2);
+    if fec_roots == 0 || fec_roots >= crate::extract::fec::FEC_RSM {
+        anyhow::bail!("invalid fec_roots: {fec_roots} (must be in 1..{})", crate::extract::fec::FEC_RSM);
+    }
     let fec_rsn = crate::extract::fec::FEC_RSM - fec_roots;
 
     let fec_data_extent_offset = fec_data_extent.start_block.unwrap_or(0) * bs;
@@ -203,7 +214,8 @@ pub fn verify_fec(
         .enumerate()
         .take(rounds as usize)
         .for_each(|(round_idx, fec_chunk)| {
-            let rs = crate::extract::fec::RsEncoder::new(fec_roots as usize);
+            let rs = crate::extract::fec::RsEncoder::try_new(fec_roots as usize)
+                .expect("fec_roots already validated");
             let mut buffer = vec![0u8; block_size as usize];
             let rs_block_size = block_size as usize * fec_rsn as usize;
             let mut rs_blocks = vec![0u8; rs_block_size];
