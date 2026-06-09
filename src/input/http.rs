@@ -165,9 +165,14 @@ where
     F: FnMut(Bytes, u64) -> std::pin::Pin<Box<dyn futures::Future<Output = Result<()>> + Send>>,
 {
     use futures::StreamExt;
+    use std::time::Instant;
 
+    let deadline = Instant::now() + Duration::from_secs(600); // 10 min total
     let end = offset + length - 1;
     for attempt in 0..=10u32 {
+        if Instant::now() >= deadline {
+            bail!("total retry deadline exceeded after {attempt} attempts");
+        }
         let mut downloaded_this_attempt = 0u64;
 
         let resp = match client
@@ -473,8 +478,6 @@ pub fn open_http_extract(
 
                 remaining -= chunk_len;
                 sub_off += chunk_len;
-                // Stagger requests slightly to avoid hitting rate limits on startup
-                tokio::time::sleep(Duration::from_millis(50)).await;
             }
 
             // Map all op_ranges that fall within this merged range
@@ -774,7 +777,7 @@ fn merge_ranges(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
     }
     let mut merged = Vec::new();
     let (mut cs, mut cl) = ranges[0];
-    const GAP: u64 = 256 * 1024;
+    const GAP: u64 = 64 * 1024;
     for &(s, l) in &ranges[1..] {
         let ce = cs + cl;
         if s <= ce + GAP {
