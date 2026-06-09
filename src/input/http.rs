@@ -302,8 +302,8 @@ async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u6
     let entry = find_cd_entry(&cd, "payload.bin").context("payload.bin not found in remote ZIP")?;
 
     let lfh = range_download(client, url, entry.local_off, 30, None).await?;
-    let n = u16::from_le_bytes(lfh[26..28].try_into().unwrap()) as u64;
-    let e = u16::from_le_bytes(lfh[28..30].try_into().unwrap()) as u64;
+    let n = u16::from_le_bytes(lfh[26..28].try_into().expect("range_download returned enough bytes")) as u64;
+    let e = u16::from_le_bytes(lfh[28..30].try_into().expect("range_download returned enough bytes")) as u64;
     Ok(entry.local_off + 30 + n + e)
 }
 
@@ -616,7 +616,7 @@ async fn fetch_zip_cd(client: &reqwest::Client, url: &str, total_size: u64) -> R
 
     let (cd_offset, cd_size) = if is_zip64 {
         let locator = &tail[eocd_pos - 20..eocd_pos];
-        let z64_off = u64::from_le_bytes(locator[8..16].try_into().unwrap());
+        let z64_off = u64::from_le_bytes(locator[8..16].try_into().expect("ZIP64 locator parsed"));
         let rec = if z64_off >= tail_offset {
             let i = (z64_off - tail_offset) as usize;
             tail[i..i + 56].to_vec()
@@ -624,14 +624,14 @@ async fn fetch_zip_cd(client: &reqwest::Client, url: &str, total_size: u64) -> R
             range_download(client, url, z64_off, 56, None).await?
         };
         (
-            u64::from_le_bytes(rec[48..56].try_into().unwrap()),
-            u64::from_le_bytes(rec[40..48].try_into().unwrap()),
+            u64::from_le_bytes(rec[48..56].try_into().expect("ZIP64 rec parsed")),
+            u64::from_le_bytes(rec[40..48].try_into().expect("ZIP64 rec parsed")),
         )
     } else {
         let eocd = &tail[eocd_pos..];
         (
-            u32::from_le_bytes(eocd[16..20].try_into().unwrap()) as u64,
-            u32::from_le_bytes(eocd[12..16].try_into().unwrap()) as u64,
+            u32::from_le_bytes(eocd[16..20].try_into().expect("EOCD parsed")) as u64,
+            u32::from_le_bytes(eocd[12..16].try_into().expect("EOCD parsed")) as u64,
         )
     };
 
@@ -660,13 +660,13 @@ fn find_cd_entry(cd: &[u8], target: &str) -> Option<CdEntry> {
         if cd[pos..pos + 4] != ZIP_CD_SIG {
             break;
         }
-        let comp_method = u16::from_le_bytes(cd[pos + 10..pos + 12].try_into().unwrap());
-        let csize_field = u32::from_le_bytes(cd[pos + 20..pos + 24].try_into().unwrap());
-        let usize_field = u32::from_le_bytes(cd[pos + 24..pos + 28].try_into().unwrap());
-        let name_len = u16::from_le_bytes(cd[pos + 28..pos + 30].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(cd[pos + 30..pos + 32].try_into().unwrap()) as usize;
-        let comment_len = u16::from_le_bytes(cd[pos + 32..pos + 34].try_into().unwrap()) as usize;
-        let local_off_field = u32::from_le_bytes(cd[pos + 42..pos + 46].try_into().unwrap());
+        let comp_method = u16::from_le_bytes(cd[pos + 10..pos + 12].try_into().expect("CD entry bounds checked"));
+        let csize_field = u32::from_le_bytes(cd[pos + 20..pos + 24].try_into().expect("CD entry bounds checked"));
+        let usize_field = u32::from_le_bytes(cd[pos + 24..pos + 28].try_into().expect("CD entry bounds checked"));
+        let name_len = u16::from_le_bytes(cd[pos + 28..pos + 30].try_into().expect("CD entry bounds checked")) as usize;
+        let extra_len = u16::from_le_bytes(cd[pos + 30..pos + 32].try_into().expect("CD entry bounds checked")) as usize;
+        let comment_len = u16::from_le_bytes(cd[pos + 32..pos + 34].try_into().expect("CD entry bounds checked")) as usize;
+        let local_off_field = u32::from_le_bytes(cd[pos + 42..pos + 46].try_into().expect("CD entry bounds checked"));
 
         if pos + 46 + name_len > cd.len() {
             break;
@@ -714,8 +714,8 @@ async fn download_stored_zip_entry(
     if buf.len() < 30 {
         bail!("LFH truncated for {target}");
     }
-    let n = u16::from_le_bytes(buf[26..28].try_into().unwrap()) as usize;
-    let e = u16::from_le_bytes(buf[28..30].try_into().unwrap()) as usize;
+    let n = u16::from_le_bytes(buf[26..28].try_into().expect("LH truncated check passed")) as usize;
+    let e = u16::from_le_bytes(buf[28..30].try_into().expect("LH truncated check passed")) as usize;
     let data_off = 30 + n + e;
     let data_end = data_off + entry.compressed_size as usize;
 
@@ -748,8 +748,8 @@ fn resolve_zip64_fields(
 
     let mut p = 0;
     while p + 4 <= extra.len() {
-        let tag = u16::from_le_bytes(extra[p..p + 2].try_into().unwrap());
-        let sz = u16::from_le_bytes(extra[p + 2..p + 4].try_into().unwrap()) as usize;
+        let tag = u16::from_le_bytes(extra[p..p + 2].try_into().expect("extra field bounds checked"));
+        let sz = u16::from_le_bytes(extra[p + 2..p + 4].try_into().expect("extra field bounds checked")) as usize;
         if tag == 0x0001 && p + 4 + sz <= extra.len() {
             let body = &extra[p + 4..p + 4 + sz];
             let mut q = 0usize;

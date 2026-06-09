@@ -47,7 +47,7 @@ pub fn apply_lz4diff(
     let version = u32::from_be_bytes(
         patch_data[VERSION_OFFSET..VERSION_OFFSET + 4]
             .try_into()
-            .unwrap(),
+            .expect("slice len checked above"),
     );
     if version != LZ4DIFF_VERSION {
         bail!("unsupported LZ4DIFF version: {version} (expected {LZ4DIFF_VERSION})");
@@ -56,7 +56,7 @@ pub fn apply_lz4diff(
     let pb_size = u32::from_be_bytes(
         patch_data[PB_SIZE_OFFSET..PB_SIZE_OFFSET + 4]
             .try_into()
-            .unwrap(),
+            .expect("slice len checked above"),
     ) as usize;
     let pb_end = PB_DATA_OFFSET + pb_size;
     if patch_data.len() < pb_end {

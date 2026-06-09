@@ -25,24 +25,24 @@ impl PayloadHeader {
             });
         }
 
-        let magic: [u8; 4] = data[0..4].try_into().unwrap();
+        let magic: [u8; 4] = data[0..4].try_into().expect("slice len checked above");
         if &magic != MAGIC {
             return Err(PayloadError::InvalidMagic(magic));
         }
 
-        let version = u64::from_be_bytes(data[4..12].try_into().unwrap());
+        let version = u64::from_be_bytes(data[4..12].try_into().expect("slice len checked above"));
         if version != SUPPORTED_VERSION {
             return Err(PayloadError::UnsupportedVersion(version));
         }
 
-        let manifest_size = u64::from_be_bytes(data[12..20].try_into().unwrap());
+        let manifest_size = u64::from_be_bytes(data[12..20].try_into().expect("slice len checked above"));
         if manifest_size > MAX_MANIFEST_SIZE {
             return Err(PayloadError::ManifestTooLarge {
                 size: manifest_size,
                 max: MAX_MANIFEST_SIZE,
             });
         }
-        let metadata_signature_size = u32::from_be_bytes(data[20..24].try_into().unwrap());
+        let metadata_signature_size = u32::from_be_bytes(data[20..24].try_into().expect("slice len checked above"));
 
         Ok(Self {
             version,
