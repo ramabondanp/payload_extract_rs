@@ -6,10 +6,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.protoc_executable(protoc);
         }
         Err(err) => {
-            println!(
-                "cargo:warning=Unable to use vendored protoc ({}); falling back to PROTOC or `protoc` on PATH",
-                err
-            );
+            eprintln!("WARNING: vendored protoc unavailable: {err}");
+            let has_system_protoc = std::env::var("PROTOC").is_ok()
+                || std::process::Command::new("protoc")
+                    .arg("--version")
+                    .output()
+                    .is_ok();
+            if !has_system_protoc {
+                eprintln!("ERROR: no protoc found. Install protoc or set PROTOC env var.");
+                return Err("protoc binary not found (set PROTOC or install protobuf-compiler)".into());
+            }
         }
     }
 
