@@ -488,14 +488,22 @@ fn read_from_extents(source: &[u8], extents: &[(u64, u64)], block_size: u32, buf
     if buf.capacity() < total_size {
         buf.reserve(total_size - buf.capacity());
     }
+    buf.resize(total_size, 0); // pre-fill so short reads are zero-padded, not silently truncated
+    let mut written = 0usize;
 
     for &(start_block, num_blocks) in extents {
         let offset = (start_block * block_size as u64) as usize;
         let len = (num_blocks * block_size as u64) as usize;
         let end = (offset + len).min(source.len());
-        if offset < source.len() {
-            buf.extend_from_slice(&source[offset..end]);
-        }
+        let read_len = if offset < source.len() {
+            let rl = end - offset;
+            buf[written..written + rl].copy_from_slice(&source[offset..end]);
+            rl
+        } else {
+            0
+        };
+        written += len; // advance even for missing source ranges (already zero-padded)
+        let _ = read_len;
     }
 }
 
