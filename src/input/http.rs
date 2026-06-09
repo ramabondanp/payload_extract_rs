@@ -20,6 +20,12 @@ const ZIP_CD_SIG: [u8; 4] = [0x50, 0x4B, 0x01, 0x02];
 const ZIP64_LOCATOR_SIG: [u8; 4] = [0x50, 0x4B, 0x06, 0x07];
 
 fn build_client(insecure: bool) -> Result<reqwest::Client> {
+    if insecure {
+        eprintln!(
+            "{} TLS certificate verification is disabled — connection is vulnerable to man-in-the-middle attacks",
+            crate::style::warning().apply_to("WARNING:")
+        );
+    }
     reqwest::Client::builder()
         .danger_accept_invalid_certs(insecure)
         .timeout(Duration::from_secs(3600))
