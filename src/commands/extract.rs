@@ -159,6 +159,10 @@ pub fn run(args: ExtractArgs, insecure: bool) -> Result<()> {
 }
 
 /// Build partition name list with include/exclude filtering.
+///
+/// When both `include` and `exclude` are `None`, returns an empty `Vec`
+/// which the caller interprets as "all partitions" — this convention is
+/// matched by `PayloadView::selected_partitions()`.
 fn build_partition_list(
     payload: &crate::payload::PayloadView,
     include: Option<&[String]>,
