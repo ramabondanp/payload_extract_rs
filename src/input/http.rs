@@ -527,8 +527,7 @@ pub fn open_http_extract(
 
         let file = std::fs::File::open(&guard.path)?;
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
-        // Deactivate guard and remove file manually. 
-        // On Unix, the mmap keeps the data alive even after remove_file.
+        drop(file); // close fd before unlink; mmap pins the inode independently
         guard.active = false;
         let _ = std::fs::remove_file(&guard.path);
 
