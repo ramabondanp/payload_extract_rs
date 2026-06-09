@@ -167,9 +167,19 @@ impl PayloadView {
         }
 
         // Mmap mode: direct indexing
-        let abs_start =
-            self.payload_offset as usize + self.data_offset as usize + data_offset as usize;
-        let abs_end = abs_start + data_length as usize;
+        let abs_start = (self.payload_offset as u64)
+            .checked_add(self.data_offset)
+            .and_then(|v| v.checked_add(data_offset))
+            .ok_or(PayloadError::PayloadTooSmall {
+                expected: 0,
+                actual: 0,
+            })? as usize;
+        let abs_end = abs_start
+            .checked_add(data_length as usize)
+            .ok_or(PayloadError::PayloadTooSmall {
+                expected: 0,
+                actual: 0,
+            })?;
         slice
             .get(abs_start..abs_end)
             .ok_or(PayloadError::PayloadTooSmall {
