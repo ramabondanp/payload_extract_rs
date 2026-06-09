@@ -195,40 +195,4 @@ impl PayloadView {
         &self.data.as_slice()[base..end]
     }
 
-    #[allow(dead_code)]
-    pub fn metadata_signature_bytes(&self) -> Option<&[u8]> {
-        if self.header.metadata_signature_size == 0 {
-            return None;
-        }
-        let base = self.payload_offset as usize;
-        let start = base + HEADER_SIZE + self.header.manifest_size as usize;
-        let end = start + self.header.metadata_signature_size as usize;
-        let slice = self.data.as_slice();
-        if end <= slice.len() {
-            Some(&slice[start..end])
-        } else {
-            None
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn metadata_hash(&self) -> Vec<u8> {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(self.metadata_bytes()).to_vec()
-    }
-
-    #[allow(dead_code)]
-    pub fn payload_signatures_bytes(&self) -> Option<&[u8]> {
-        let offset = self.manifest.signatures_offset?;
-        let size = self.manifest.signatures_size?;
-        let base = self.payload_offset as usize + self.data_offset as usize;
-        let start = base + offset as usize;
-        let end = start + size as usize;
-        let slice = self.data.as_slice();
-        if end <= slice.len() {
-            Some(&slice[start..end])
-        } else {
-            None
-        }
-    }
 }
