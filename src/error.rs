@@ -8,6 +8,9 @@ pub enum PayloadError {
     #[error("unsupported payload version: {0} (expected 2)")]
     UnsupportedVersion(u64),
 
+    #[error("manifest too large: {size} bytes (maximum is {max})")]
+    ManifestTooLarge { size: u64, max: u64 },
+
     #[error("payload too small: need at least {expected} bytes, got {actual}")]
     PayloadTooSmall { expected: usize, actual: usize },
 
