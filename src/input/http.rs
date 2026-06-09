@@ -32,8 +32,60 @@ fn build_client(insecure: bool) -> Result<reqwest::Client> {
         .connect_timeout(Duration::from_secs(60))
         .pool_max_idle_per_host(4)
         .redirect(reqwest::redirect::Policy::limited(10))
+        .no_proxy() // disables proxy-based SSRF via env vars
         .build()
         .context("failed to build HTTP client")
+}
+
+/// Validate that a URL hostname is not a private, loopback, link-local,
+/// or cloud-metadata address. Rejects raw IPs in those ranges regardless
+/// of DNS resolution. Doesn't prevent all SSRF vectors but blocks
+/// the most common ones.
+fn validate_url(url_str: &str) -> Result<()> {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let url = url::Url::parse(url_str).context("invalid URL")?;
+    let host = url.host_str().context("URL has no host")?;
+
+    // Reject raw IPs in private/loopback/link-local ranges
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let bad = match ip {
+            IpAddr::V4(ipv4) => {
+                ipv4.is_loopback()
+                    || ipv4.is_private()
+                    || ipv4.is_link_local()
+                    || ipv4.is_unspecified()
+                    || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254 // link-local
+                    || ipv4 == Ipv4Addr::new(0, 0, 0, 0)
+            }
+            IpAddr::V6(ipv6) => {
+                ipv6.is_loopback()
+                    || ipv6.is_unspecified()
+                    || ipv6.to_ipv4().is_some_and(|v4| {
+                        v4.is_loopback()
+                            || v4.is_private()
+                            || v4.is_link_local()
+                    })
+                    || ipv6.segments()[0] & 0xffc0 == 0xfe80 // link-local
+                    || ipv6.segments()[0] == 0x0000 && ipv6.segments()[1] == 0x0000 // IPv4-mapped/embedded
+                        && ipv6.segments()[2] == 0x0000 && ipv6.segments()[3] == 0x0000
+                        && ipv6.segments()[4] == 0x0000 && ipv6.segments()[5] == 0xffff
+            }
+        };
+        if bad {
+            bail!("URL resolves to a private/internal address: {host}");
+        }
+    } else {
+        // Reject bare hostnames that look like they target internal services
+        let host_lower = host.to_lowercase();
+        if host_lower == "localhost"
+            || host_lower.ends_with(".local")
+            || host_lower.ends_with(".internal")
+        {
+            bail!("URL targets a reserved hostname: {host}");
+        }
+    }
+    Ok(())
 }
 
 fn build_runtime() -> Result<tokio::runtime::Runtime> {
@@ -251,6 +303,7 @@ async fn detect_payload_offset(client: &reqwest::Client, url: &str) -> Result<u6
 }
 
 pub fn open_http_metadata(url: &str, insecure: bool) -> Result<PayloadView> {
+    validate_url(url)?;
     let rt = build_runtime()?;
     rt.block_on(async {
         let client = build_client(insecure)?;
@@ -278,6 +331,7 @@ pub fn open_http_extract(
     partition_names: &[String],
     insecure: bool,
 ) -> Result<PayloadView> {
+    validate_url(url)?;
     let rt = build_runtime()?;
     rt.block_on(async {
         let client = build_client(insecure)?;
@@ -485,6 +539,7 @@ pub fn open_http_extract(
 /// Fetch META-INF/com/android/metadata and metadata.pb from a remote OTA ZIP.
 /// The two entries are downloaded concurrently after a single CD fetch.
 pub fn read_ota_metadata_http(url: &str, insecure: bool) -> Result<OtaMetadataData> {
+    validate_url(url)?;
     let rt = build_runtime()?;
     rt.block_on(async {
         let client = build_client(insecure)?;
