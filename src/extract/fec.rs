@@ -17,12 +17,12 @@ pub struct RsEncoder {
 
 #[inline]
 fn modnn(x: usize) -> usize {
-    let mut v = x;
-    while v >= NN {
-        v -= NN;
-        v = (v >> 8) + (v & NN);
+    debug_assert!(x < 2 * NN);
+    if x >= NN {
+        x - NN
+    } else {
+        x
     }
-    v
 }
 
 // Index-based loops match the canonical RS algorithm structure and are clearer
@@ -101,6 +101,25 @@ impl RsEncoder {
         let nroots = self.nroots;
         let data_len = nn - nroots; // pad=0, so data length = NN - NROOTS
 
+        if nroots == 2 {
+            parity.fill(0);
+            let len = data.len().min(data_len);
+            let genpoly0 = self.genpoly[0] as usize;
+            let genpoly1 = self.genpoly[1] as usize;
+            for &byte in &data[..len] {
+                let feedback = self.index_of[(byte ^ parity[0]) as usize] as usize;
+                if feedback != nn {
+                    let p1 = parity[1] ^ self.alpha_to[modnn(feedback + genpoly1)];
+                    parity[0] = p1;
+                    parity[1] = self.alpha_to[modnn(feedback + genpoly0)];
+                } else {
+                    parity[0] = parity[1];
+                    parity[1] = 0;
+                }
+            }
+            return;
+        }
+
         parity.fill(0);
 
         let len = data.len().min(data_len);
@@ -114,7 +133,13 @@ impl RsEncoder {
                 }
             }
             // Shift
-            parity.copy_within(1..nroots, 0);
+            if nroots <= 8 {
+                for j in 0..nroots - 1 {
+                    parity[j] = parity[j + 1];
+                }
+            } else {
+                parity.copy_within(1..nroots, 0);
+            }
             if (feedback as usize) != nn {
                 parity[nroots - 1] =
                     self.alpha_to[modnn(feedback as usize + self.genpoly[0] as usize)];
