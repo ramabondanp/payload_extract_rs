@@ -72,7 +72,7 @@ protoc-bin-vendored = "3"
 tempfile = "3"
 
 [features]
-default = ["http-native-tls"]
+default = ["http-rustls"]
 http = ["dep:tokio", "dep:reqwest", "dep:futures", "dep:tempfile"]
 http-native-tls = ["http", "reqwest?/native-tls"]
 http-rustls = ["http", "dep:webpki-root-certs", "dep:rustls", "reqwest?/rustls-no-provider"]
