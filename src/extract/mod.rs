@@ -11,10 +11,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
@@ -104,7 +104,9 @@ pub fn extract_partitions(
 
     // Configure rayon thread pool
     let thread_count = if config.threads == 0 {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
     } else {
         config.threads
     };
@@ -565,7 +567,9 @@ mod stream_tests {
         let bs = 4096u32;
         let extents = vec![(2u64, 3u64), (10, 1), (20, 2)]; // non-contiguous
         let total = (3 + 1 + 2) * bs as usize;
-        let data: Vec<u8> = (0..total).map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8).collect();
+        let data: Vec<u8> = (0..total)
+            .map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8)
+            .collect();
 
         let dir = std::env::temp_dir();
         let pa = dir.join("pe_ew_a.img");

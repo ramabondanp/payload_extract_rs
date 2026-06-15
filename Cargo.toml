@@ -14,7 +14,16 @@ path = "src/main.rs"
 
 [dependencies]
 # CLI
-clap = { version = "4", default-features = false, features = ["derive", "color", "wrap_help", "std", "help", "usage", "error-context", "suggestions"] }
+clap = { version = "4", default-features = false, features = [
+  "derive",
+  "color",
+  "wrap_help",
+  "std",
+  "help",
+  "usage",
+  "error-context",
+  "suggestions",
+] }
 
 # Error handling
 thiserror = "2"
@@ -53,13 +62,25 @@ console = "0.16"
 # Utilities
 chrono = "0.4"
 hex = { version = "0.4", default-features = false, features = ["std"] }
-serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+  "std",
+] }
 serde_json = "1"
 
 # Async HTTP (feature-gated)
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time"], optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["stream"], optional = true }
-futures = { version = "0.3", default-features = false, features = ["std"], optional = true }
+tokio = { version = "1", default-features = false, features = [
+  "rt-multi-thread",
+  "macros",
+  "sync",
+  "time",
+], optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+  "stream",
+], optional = true }
+futures = { version = "0.3", default-features = false, features = [
+  "std",
+], optional = true }
 tempfile = { version = "3", optional = true }
 
 [build-dependencies]
