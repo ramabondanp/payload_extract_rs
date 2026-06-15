@@ -1,9 +1,9 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::extract::bufpool;
-use crate::proto::{CompressedBlockInfo, Lz4diffHeader, compression_algorithm};
+use crate::proto::{compression_algorithm, CompressedBlockInfo, Lz4diffHeader};
 use crate::style;
 
 const LZ4DIFF_MAGIC: &[u8; 7] = b"LZ4DIFF";
