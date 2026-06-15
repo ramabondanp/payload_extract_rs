@@ -104,19 +104,27 @@ pub fn verify_hash_tree(
             hash_slot.copy_from_slice(&hasher.finalize());
         });
 
-    let mut reconstructed_tree_data = Vec::new();
     let mut levels = Vec::new();
     let mut prev_hash_size = current_level_data.len() as u64;
     let mut prev_hash_data = current_level_data.clone();
+
+    // Precalculate total size for reconstructed_tree_data
+    let mut total_reconstructed_size = 0usize;
+    let mut size_temp = prev_hash_size;
+    while size_temp > block_size as u64 {
+        let next_size = align_up((size_temp / block_size as u64) * 32, block_size as u64) as usize;
+        total_reconstructed_size += next_size;
+        size_temp = next_size as u64;
+    }
+    total_reconstructed_size += current_level_data.len();
+    let mut reconstructed_tree_data = Vec::with_capacity(total_reconstructed_size);
 
     while prev_hash_size > block_size as u64 {
         // Compute next level up
         let mut next_level_data = vec![
             0u8;
-            align_up(
-                (prev_hash_size / block_size as u64) * 32,
-                block_size as u64
-            ) as usize
+            align_up((prev_hash_size / block_size as u64) * 32, block_size as u64)
+                as usize
         ];
         let mut write_pos = 0usize;
         let mut read_pos = 0usize;

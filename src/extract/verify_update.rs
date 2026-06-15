@@ -7,11 +7,11 @@
 /// Both are needed to produce partition images that pass Android's verified boot checks.
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
-use crate::extract::fec::{self, FEC_RSM, RsEncoder};
+use crate::extract::fec::{self, RsEncoder, FEC_RSM};
 use crate::proto::PartitionUpdate;
 use crate::style;
 
@@ -53,12 +53,7 @@ fn pread_exact(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Re
 
 /// Zero `buf`, then read up to `buf.len()` bytes at `offset` clamped to `file_len`
 /// (bytes past EOF stay zero). Returns the count of real bytes read.
-fn read_clamped(
-    file: &std::fs::File,
-    buf: &mut [u8],
-    offset: u64,
-    file_len: u64,
-) -> Result<usize> {
+fn read_clamped(file: &std::fs::File, buf: &mut [u8], offset: u64, file_len: u64) -> Result<usize> {
     buf.fill(0);
     if offset >= file_len {
         return Ok(0);
@@ -160,7 +155,8 @@ pub fn compute_and_write_hash_tree(
             for slot in slot_start..slot_end {
                 // Slots >= leaf_block_count are zero padding (already zero in `out`).
                 if slot < leaf_block_count {
-                    let n = read_clamped(&file, &mut block, data_extent_offset + slot * bs, file_len)?;
+                    let n =
+                        read_clamped(&file, &mut block, data_extent_offset + slot * bs, file_len)?;
                     let mut hasher = Sha256::new();
                     hasher.update(salt);
                     hasher.update(&block[..n]);
@@ -168,7 +164,11 @@ pub fn compute_and_write_hash_tree(
                     out[dst..dst + SHA256_DIGEST_SIZE].copy_from_slice(&hasher.finalize());
                 }
             }
-            write_at_offset(&file, &out, leaf_offset + slot_start * SHA256_DIGEST_SIZE as u64)?;
+            write_at_offset(
+                &file,
+                &out,
+                leaf_offset + slot_start * SHA256_DIGEST_SIZE as u64,
+            )?;
             Ok(())
         })?;
 
@@ -179,7 +179,10 @@ pub fn compute_and_write_hash_tree(
     let salt_len = salt.len();
     let mut prev_mem: Option<Vec<u8>> = None;
     for (i, &level_size) in inter_sizes.iter().enumerate() {
-        let prev_len = prev_mem.as_ref().map(|b| b.len() as u64).unwrap_or(leaf_size);
+        let prev_len = prev_mem
+            .as_ref()
+            .map(|b| b.len() as u64)
+            .unwrap_or(leaf_size);
         let level_block_count = prev_len / bs;
         let mut level = vec![0u8; level_size as usize];
         let mut salt_buf = vec![0u8; salt_len + bs as usize];
@@ -272,47 +275,73 @@ pub fn compute_and_write_fec(
 
     let chunk_size = block_size as usize * fec_roots as usize;
 
+    thread_local! {
+        static FEC_SCRATCH: std::cell::RefCell<(Vec<u8>, Vec<u8>, Vec<u8>)> = const {
+            std::cell::RefCell::new((Vec::new(), Vec::new(), Vec::new()))
+        };
+    }
+
     // Each round produces an independent, contiguous `chunk_size` slice of parity
     // and is written straight to disk — no partition-proportional accumulator.
-    (0..rounds).into_par_iter().try_for_each(|round_idx| -> Result<()> {
-        let rs = RsEncoder::try_new(fec_roots as usize).map_err(|e| anyhow::anyhow!(e))?;
-        let mut block = vec![0u8; block_size as usize];
-        let rs_block_size = block_size as usize * fec_rsn as usize;
-        let mut rs_blocks = vec![0u8; rs_block_size];
-        let mut parity = vec![0u8; chunk_size];
+    (0..rounds)
+        .into_par_iter()
+        .try_for_each(|round_idx| -> Result<()> {
+            let rs = RsEncoder::try_new(fec_roots as usize).map_err(|e| anyhow::anyhow!(e))?;
+            let rs_block_size = block_size as usize * fec_rsn as usize;
 
-        // Construct RS blocks from interleaved data
-        for j in 0..fec_rsn as usize {
-            let offset = fec::fec_ecc_interleave(
-                round_idx * fec_rsn as u64 * bs + j as u64,
-                fec_rsn,
-                rounds,
-            );
+            FEC_SCRATCH.with(|cell| -> Result<()> {
+                let mut scratch = cell.borrow_mut();
+                let (ref mut block, ref mut rs_blocks, ref mut parity) = *scratch;
 
-            if offset < fec_data_extent_size {
-                read_clamped(&file, &mut block, fec_data_extent_offset + offset, file_len)?;
-            } else {
-                block.fill(0);
-            }
+                if block.len() < block_size as usize {
+                    block.resize(block_size as usize, 0);
+                }
+                if rs_blocks.len() < rs_block_size {
+                    rs_blocks.resize(rs_block_size, 0);
+                }
+                if parity.len() < chunk_size {
+                    parity.resize(chunk_size, 0);
+                }
 
-            // Place into RS block: rsBlocks[col * rsn + row] = block[col]
-            for k in 0..block_size as usize {
-                rs_blocks[k * fec_rsn as usize + j] = block[k];
-            }
-        }
+                // Construct RS blocks from interleaved data
+                for j in 0..fec_rsn as usize {
+                    let offset = fec::fec_ecc_interleave(
+                        round_idx * fec_rsn as u64 * bs + j as u64,
+                        fec_rsn,
+                        rounds,
+                    );
 
-        // Encode each byte column
-        for j in 0..block_size as usize {
-            let data_start = j * fec_rsn as usize;
-            let data_slice = &rs_blocks[data_start..data_start + fec_rsn as usize];
-            let parity_start = j * fec_roots as usize;
-            let parity_end = parity_start + fec_roots as usize;
-            rs.encode(data_slice, &mut parity[parity_start..parity_end]);
-        }
+                    if offset < fec_data_extent_size {
+                        read_clamped(&file, block, fec_data_extent_offset + offset, file_len)?;
+                    } else {
+                        block.fill(0);
+                    }
 
-        write_at_offset(&file, &parity, fec_write_offset + round_idx * chunk_size as u64)?;
-        Ok(())
-    })?;
+                    // Place into RS block: rsBlocks[col * rsn + row] = block[col]
+                    for k in 0..block_size as usize {
+                        rs_blocks[k * fec_rsn as usize + j] = block[k];
+                    }
+                }
+
+                // Encode each byte column
+                for j in 0..block_size as usize {
+                    let data_start = j * fec_rsn as usize;
+                    let data_slice = &rs_blocks[data_start..data_start + fec_rsn as usize];
+                    let parity_start = j * fec_roots as usize;
+                    let parity_end = parity_start + fec_roots as usize;
+                    rs.encode(data_slice, &mut parity[parity_start..parity_end]);
+                }
+
+                write_at_offset(
+                    &file,
+                    &parity[..chunk_size],
+                    fec_write_offset + round_idx * chunk_size as u64,
+                )?;
+                Ok(())
+            })?;
+
+            Ok(())
+        })?;
 
     Ok(true)
 }
