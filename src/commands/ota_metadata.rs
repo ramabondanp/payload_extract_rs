@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{TimeZone, Utc};
 use clap::Args;
 
 use crate::input;
@@ -50,8 +51,21 @@ fn print_text(text: &TextMetadata) {
     );
     let key_width = text.entries.keys().map(|k| k.len()).max().unwrap_or(0);
     for (k, v) in &text.entries {
+        let val = if k.contains("timestamp") {
+            if let Ok(ts) = v.parse::<i64>() {
+                let dt = Utc.timestamp_opt(ts, 0).single();
+                match dt {
+                    Some(dt) => format!("{v} ({})", dt.format("%Y-%m-%d %H:%M:%S UTC")),
+                    None => format!("{v} (invalid)"),
+                }
+            } else {
+                v.clone()
+            }
+        } else {
+            v.clone()
+        };
         println!(
-            "  {:<width$}  {v}",
+            "  {:<width$}  {val}",
             style::bold().apply_to(k),
             width = key_width
         );
@@ -125,10 +139,14 @@ fn print_device_state(d: &DeviceState, prefix: &str) {
         );
     }
     if d.timestamp != 0 {
+        let dt = Utc.timestamp_opt(d.timestamp, 0).single();
+        let ts_str = match dt {
+            Some(dt) => format!("{} ({})", d.timestamp, dt.format("%Y-%m-%d %H:%M:%S UTC")),
+            None => format!("{} (invalid)", d.timestamp),
+        };
         println!(
-            "{prefix}{} {}",
+            "{prefix}{} {ts_str}",
             style::label().apply_to("Timestamp:"),
-            d.timestamp
         );
     }
     if !d.sdk_level.is_empty() {
