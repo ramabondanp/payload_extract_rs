@@ -7,11 +7,11 @@
 /// Both are needed to produce partition images that pass Android's verified boot checks.
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
-use crate::extract::fec::{self, RsEncoder, FEC_RSM};
+use crate::extract::fec::{self, FEC_RSM, RsEncoder};
 use crate::proto::PartitionUpdate;
 use crate::style;
 

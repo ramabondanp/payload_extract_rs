@@ -18,11 +18,7 @@ pub struct RsEncoder {
 #[inline]
 fn modnn(x: usize) -> usize {
     debug_assert!(x < 2 * NN);
-    if x >= NN {
-        x - NN
-    } else {
-        x
-    }
+    if x >= NN { x - NN } else { x }
 }
 
 // Index-based loops match the canonical RS algorithm structure and are clearer

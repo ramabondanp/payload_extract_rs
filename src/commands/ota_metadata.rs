@@ -144,10 +144,7 @@ fn print_device_state(d: &DeviceState, prefix: &str) {
             Some(dt) => format!("{} ({})", d.timestamp, dt.format("%Y-%m-%d %H:%M:%S UTC")),
             None => format!("{} (invalid)", d.timestamp),
         };
-        println!(
-            "{prefix}{} {ts_str}",
-            style::label().apply_to("Timestamp:"),
-        );
+        println!("{prefix}{} {ts_str}", style::label().apply_to("Timestamp:"),);
     }
     if !d.sdk_level.is_empty() {
         println!(
