@@ -33,7 +33,7 @@ memmap2 = "0.9"
 zstd = { version = "0.13", default-features = false }
 xz2 = "0.1"
 bzip2 = "0.6"
-lz4_flex = { version = "0.14", default-features = false }
+lz4_flex = { version = "0.14", default-features = false, features = ["alloc"] }
 
 # Binary diff (Android BSDF2 format support for BROTLI_BSDIFF)
 bsdiff-android = "0.0.2"
