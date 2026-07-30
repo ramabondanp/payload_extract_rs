@@ -2,7 +2,7 @@
 name = "payload-extract"
 version = "0.1.1"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97.1"
 description = "Android OTA payload.bin extractor"
 license = "GPL-2.0"
 keywords = ["android", "ota", "payload", "extraction"]
@@ -33,7 +33,7 @@ memmap2 = "0.9"
 zstd = { version = "0.13", default-features = false }
 xz2 = "0.1"
 bzip2 = "0.6"
-lz4_flex = { version = "0.13", default-features = false }
+lz4_flex = { version = "0.14", default-features = false }
 
 # Binary diff (Android BSDF2 format support for BROTLI_BSDIFF)
 bsdiff-android = "0.0.2"
