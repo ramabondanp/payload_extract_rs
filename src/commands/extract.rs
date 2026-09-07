@@ -48,6 +48,14 @@ pub struct ExtractArgs {
     /// Quiet mode (no progress bars)
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Resume partial download if available (enabled by default)
+    #[arg(long)]
+    pub resume: bool,
+
+    /// Do not resume partial download; restart from scratch
+    #[arg(long, conflicts_with = "resume")]
+    pub no_resume: bool,
 }
 
 pub fn run(args: ExtractArgs, insecure: bool, user_agent: Option<&str>) -> Result<()> {
@@ -80,6 +88,7 @@ pub fn run(args: ExtractArgs, insecure: bool, user_agent: Option<&str>) -> Resul
         download_progress: None,
         temp_dir: Some(args.output.clone()),
         concurrency: args.concurrency,
+        resume: args.resume && !args.no_resume,
     };
     let payload = input::open_for_extract_with(&args.input, &filter, &open_opts)?;
 
@@ -145,6 +154,7 @@ pub fn run(args: ExtractArgs, insecure: bool, user_agent: Option<&str>) -> Resul
         }
     }
 
+    payload.mark_success();
     Ok(())
 }
 

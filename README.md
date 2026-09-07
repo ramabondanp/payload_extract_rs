@@ -13,7 +13,7 @@ Android OTA `payload.bin` extractor written in Rust.
 - **Zero-copy extraction** — memory-mapped I/O with direct `pwrite`
 - **Parallel processing** — rayon work-stealing thread pool for concurrent decompression
 - **Streaming decompression** — operation output is written incrementally, keeping heap memory bounded regardless of partition size
-- **HTTP range requests** — extract specific partitions from remote OTA packages without downloading the entire file
+- **HTTP range requests & resumable downloads** — extract specific partitions from remote OTA packages without downloading the entire file; automatically retries and resumes downloads on network errors
 - **Rich operation types** — REPLACE, REPLACE_BZ, REPLACE_XZ, REPLACE_ZSTD, BROTLI_BSDIFF, LZ4DIFF_BSDIFF, ZERO, DISCARD, SOURCE_COPY, SOURCE_BSDIFF
 - **Multiple input sources** — local `.bin` files, OTA ZIP archives, HTTP/HTTPS URLs
 - **Already-open outputs** — the library can extract a partition directly into a caller-owned writable, seekable file without reopening a path
@@ -45,8 +45,11 @@ payload-extract extract payload.bin -p boot,init_boot,vbmeta
 # Extract from OTA ZIP
 payload-extract extract ota.zip -p init_boot
 
-# Extract from HTTP URL (downloads only needed data)
+# Extract from HTTP URL (downloads only needed data, automatically resumes on error)
 payload-extract extract "https://example.com/ota.zip" -p init_boot
+
+# Disable download resume (uses memory for smaller downloads)
+payload-extract extract "https://example.com/ota.zip" -p init_boot --no-resume
 
 # Exclude specific partitions (-p and -x are mutually exclusive)
 payload-extract extract payload.bin -x system,vendor,product
@@ -134,7 +137,7 @@ payload-extract -A "CustomAgent/1.0" list "https://..."
 - **零拷贝提取** — 内存映射 I/O + 直接 `pwrite`
 - **并行处理** — rayon work-stealing 线程池，并发解压缩
 - **流式解压** — 操作输出增量写盘，堆内存占用不随分区大小增长
-- **HTTP 分段下载** — 从远程 OTA 包中提取指定分区，无需下载完整文件
+- **HTTP 分段下载与断点续传** — 从远程 OTA 包中提取指定分区，无需下载完整文件；网络出错自动重试续传，支持跨运行断点续传
 - **丰富的操作类型** — REPLACE、REPLACE_BZ、REPLACE_XZ、REPLACE_ZSTD、BROTLI_BSDIFF、LZ4DIFF_BSDIFF、ZERO、DISCARD、SOURCE_COPY、SOURCE_BSDIFF
 - **多输入源** — 本地 `.bin` 文件、OTA ZIP 压缩包、HTTP/HTTPS URL
 - **已打开文件输出** — 库接口支持直接向调用方持有的可写、可定位文件提取分区，无需重新打开路径
@@ -166,8 +169,11 @@ payload-extract extract payload.bin -p boot,init_boot,vbmeta
 # 从 OTA ZIP 提取
 payload-extract extract ota.zip -p init_boot
 
-# 从 HTTP URL 提取（仅下载所需数据）
+# 从 HTTP URL 提取（仅下载所需数据，出错自动断点续传）
 payload-extract extract "https://example.com/ota.zip" -p init_boot
+
+# 禁用断点续传（较小的下载使用内存）
+payload-extract extract "https://example.com/ota.zip" -p init_boot --no-resume
 
 # 排除指定分区（-p 与 -x 互斥）
 payload-extract extract payload.bin -x system,vendor,product
