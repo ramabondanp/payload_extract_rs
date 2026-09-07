@@ -342,17 +342,43 @@ pub fn open_http_extract(
         )?;
         let data_offset = header.data_offset();
 
-        let parts: Vec<_> = if partition_names.is_empty() {
-            manifest.partitions.iter().collect()
-        } else {
-            manifest
-                .partitions
-                .iter()
-                .filter(|p| partition_names.iter().any(|n| n == &p.partition_name))
-                .collect()
-        };
-        if parts.is_empty() && !partition_names.is_empty() {
+        let parts: Vec<_> = manifest
+            .partitions
+            .iter()
+            .filter(|p| {
+                if !partition_names.is_empty()
+                    && !partition_names.iter().any(|n| n == &p.partition_name)
+                {
+                    return false;
+                }
+                if opts
+                    .exclude
+                    .as_ref()
+                    .is_some_and(|exc| exc.iter().any(|n| n == &p.partition_name))
+                {
+                    return false;
+                }
+                true
+            })
+            .collect();
+        if parts.is_empty() && (!partition_names.is_empty() || opts.exclude.is_some()) {
             bail!("none of the specified partitions found");
+        }
+
+        // Validate source partitions for delta OTA BEFORE downloading any data!
+        let mut source_validated = false;
+        let has_delta_ops = parts
+            .iter()
+            .any(|p| crate::extract::partition_has_delta_ops(p));
+        if has_delta_ops {
+            let Some(ref src_dir) = opts.source_dir else {
+                bail!(
+                    "this is a delta/incremental OTA payload — \
+                     source partition directory is required (use --source-dir)"
+                );
+            };
+            crate::extract::validate_source_partitions(&parts, src_dir)?;
+            source_validated = true;
         }
 
         let mut op_ranges: Vec<(u64, u64)> = Vec::new();
@@ -367,7 +393,9 @@ pub fn open_http_extract(
         }
 
         if op_ranges.is_empty() {
-            return Ok(PayloadView::from_memory(meta, HashMap::new())?);
+            let mut view = PayloadView::from_memory(meta, HashMap::new())?;
+            view.set_source_validated(source_validated);
+            return Ok(view);
         }
 
         op_ranges.sort_by_key(|r| r.0);
@@ -601,6 +629,7 @@ pub fn open_http_extract(
 
         let mut view = PayloadView::from_mmap_compact(mmap, remap, Box::new(guard))?;
         view.set_success_flag(success_flag);
+        view.set_source_validated(source_validated);
         Ok(view)
     })
 }
@@ -645,6 +674,7 @@ fn plan_compact_layout(
 /// positional writes — never buffering the whole range in memory. Increments
 /// `downloaded` per chunk for progress. Can resume from `start_written` and
 /// automatically recovers/resumes on connection errors or premature EOF.
+#[allow(clippy::too_many_arguments)]
 async fn range_download_to_file(
     client: &reqwest::Client,
     url: &str,

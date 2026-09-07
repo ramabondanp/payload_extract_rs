@@ -37,6 +37,10 @@ pub struct OpenOptions {
     pub temp_dir: Option<PathBuf>,
     /// Resume partial downloads if available (default: true).
     pub resume: bool,
+    /// Source directory for delta OTA partition images.
+    pub source_dir: Option<PathBuf>,
+    /// Exclude specified partitions.
+    pub exclude: Option<Vec<String>>,
 }
 
 impl Default for OpenOptions {
@@ -47,6 +51,8 @@ impl Default for OpenOptions {
             download_progress: None,
             temp_dir: None,
             resume: true,
+            source_dir: None,
+            exclude: None,
         }
     }
 }

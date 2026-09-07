@@ -48,6 +48,7 @@ pub struct PayloadView {
     /// after `data` so it drops last; type-erased to avoid a `tempfile` dep here.
     _guard: Option<Box<dyn std::any::Any + Send + Sync>>,
     success_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    source_validated: bool,
 }
 
 impl PayloadView {
@@ -118,7 +119,18 @@ impl PayloadView {
             remap,
             _guard: None,
             success_flag: None,
+            source_validated: false,
         })
+    }
+
+    /// Returns whether source partition images have already been validated for this payload view.
+    pub fn is_source_validated(&self) -> bool {
+        self.source_validated
+    }
+
+    /// Set whether source partition images have been validated.
+    pub fn set_source_validated(&mut self, val: bool) {
+        self.source_validated = val;
     }
 
     /// Mark extraction as successful, signaling that the cleanup guard may
