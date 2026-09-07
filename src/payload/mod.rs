@@ -47,6 +47,7 @@ pub struct PayloadView {
     /// deletable only once its mmap is unmapped (required on Windows). Declared
     /// after `data` so it drops last; type-erased to avoid a `tempfile` dep here.
     _guard: Option<Box<dyn std::any::Any + Send + Sync>>,
+    success_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl PayloadView {
@@ -116,7 +117,21 @@ impl PayloadView {
             payload_offset,
             remap,
             _guard: None,
+            success_flag: None,
         })
+    }
+
+    /// Mark extraction as successful, signaling that the cleanup guard may
+    /// remove temporary download files when the view is dropped.
+    pub fn mark_success(&self) {
+        if let Some(ref flag) = self.success_flag {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Attach a success flag used to control whether temporary files are cleaned up on drop.
+    pub fn set_success_flag(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.success_flag = Some(flag);
     }
 
     pub fn header(&self) -> &PayloadHeader {
