@@ -430,6 +430,22 @@ pub fn open_http_extract(
         let parts = filter.select(&manifest.partitions)?;
         let partition_names: Vec<String> = parts.iter().map(|p| p.partition_name.clone()).collect();
 
+        // Validate source partitions for delta OTA BEFORE downloading any data!
+        let mut source_validated = false;
+        let has_delta_ops = parts
+            .iter()
+            .any(|p| crate::extract::partition_has_delta_ops(p));
+        if has_delta_ops {
+            let Some(ref src_dir) = opts.source_dir else {
+                bail!(
+                    "this is a delta/incremental OTA payload — \
+                     source partition directory is required (use --source-dir)"
+                );
+            };
+            crate::extract::validate_source_partitions(&parts, src_dir)?;
+            source_validated = true;
+        }
+
         let mut op_ranges: Vec<(u64, u64)> = Vec::new();
         for p in &parts {
             for op in &p.operations {
@@ -442,7 +458,9 @@ pub fn open_http_extract(
         }
 
         if op_ranges.is_empty() {
-            return Ok(PayloadView::from_memory(meta, HashMap::new())?);
+            let mut view = PayloadView::from_memory(meta, HashMap::new())?;
+            view.set_source_validated(source_validated);
+            return Ok(view);
         }
 
         let mut plan = plan_compact(meta_len, op_ranges, None)?;
@@ -701,7 +719,9 @@ pub fn open_http_extract(
         drop(target);
         if let Some(buf) = mem_buf {
             style::log("In-memory", style::format_size(total_size));
-            return Ok(PayloadView::from_memory(buf, plan.remap)?);
+            let mut view = PayloadView::from_memory(buf, plan.remap)?;
+            view.set_source_validated(source_validated);
+            return Ok(view);
         }
 
         // Update state to 100% completed
@@ -734,6 +754,7 @@ pub fn open_http_extract(
 
         let mut view = PayloadView::from_mmap_compact(mmap, plan.remap, Box::new(guard))?;
         view.set_success_flag(success_flag);
+        view.set_source_validated(source_validated);
         Ok(view)
     })
 }
@@ -823,6 +844,7 @@ impl DownloadTarget {
 
 /// Stream a range into memory or a file, resuming after connection errors.
 /// `range_written` tracks a contiguous checkpoint within this range.
+#[allow(clippy::too_many_arguments)]
 async fn range_download_to_target(
     client: &reqwest::Client,
     url: &str,

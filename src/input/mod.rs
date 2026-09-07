@@ -36,6 +36,8 @@ pub struct OpenOptions {
     pub concurrency: Option<usize>,
     /// Resume partial downloads if available (default: true).
     pub resume: bool,
+    /// Source directory for delta OTA partition images.
+    pub source_dir: Option<PathBuf>,
 }
 
 impl Default for OpenOptions {
@@ -47,6 +49,7 @@ impl Default for OpenOptions {
             temp_dir: None,
             concurrency: None,
             resume: true,
+            source_dir: None,
         }
     }
 }

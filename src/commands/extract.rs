@@ -89,6 +89,7 @@ pub fn run(args: ExtractArgs, insecure: bool, user_agent: Option<&str>) -> Resul
         temp_dir: Some(args.output.clone()),
         concurrency: args.concurrency,
         resume: args.resume && !args.no_resume,
+        source_dir: args.source_dir.as_ref().map(PathBuf::from),
     };
     let payload = input::open_for_extract_with(&args.input, &filter, &open_opts)?;
 
