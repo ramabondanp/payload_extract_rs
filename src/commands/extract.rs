@@ -85,6 +85,8 @@ pub fn run(args: ExtractArgs, insecure: bool, user_agent: Option<&str>) -> Resul
         download_progress: None,
         temp_dir: Some(args.output.clone()),
         resume: args.resume && !args.no_resume,
+        source_dir: args.source_dir.as_ref().map(PathBuf::from),
+        exclude: args.exclude.clone(),
     };
     let payload = input::open_for_extract_with(&args.input, &pre_partition_names, &open_opts)?;
 
