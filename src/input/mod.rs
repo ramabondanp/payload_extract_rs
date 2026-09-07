@@ -21,7 +21,7 @@ pub(crate) const ZIP_MAGIC: &[u8; 4] = &[0x50, 0x4B, 0x03, 0x04];
 pub type ProgressCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 /// Extraction input options, including HTTP progress and temporary storage.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct OpenOptions {
     /// Skip TLS certificate verification for HTTPS URLs.
     pub insecure: bool,
@@ -32,6 +32,20 @@ pub struct OpenOptions {
     pub download_progress: Option<ProgressCallback>,
     /// HTTP cache directory (default: system temp); use output on Android to avoid tmpfs.
     pub temp_dir: Option<PathBuf>,
+    /// Resume partial downloads if available (default: true).
+    pub resume: bool,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        Self {
+            insecure: false,
+            user_agent: None,
+            download_progress: None,
+            temp_dir: None,
+            resume: true,
+        }
+    }
 }
 
 /// Open a payload from a file path or URL and return a PayloadView.
