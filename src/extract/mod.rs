@@ -11,10 +11,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
@@ -258,29 +258,81 @@ pub fn extract_partitions(
     })
 }
 
-fn validate_source_partitions(
+pub fn validate_source_partitions(
     partitions: &[&crate::proto::PartitionUpdate],
     source_dir: &Path,
 ) -> Result<()> {
-    for partition in partitions {
-        if !partition_has_delta_ops(partition) {
-            continue;
-        }
+    use sha2::{Digest, Sha256};
 
-        let src_path = source_dir.join(format!("{}.img", partition.partition_name));
+    let delta_parts: Vec<_> = partitions
+        .iter()
+        .filter(|p| partition_has_delta_ops(p))
+        .copied()
+        .collect();
+
+    if delta_parts.is_empty() {
+        return Ok(());
+    }
+
+    style::log(
+        "Validating source images",
+        format_args!(
+            "{} partition(s) in {}",
+            delta_parts.len(),
+            source_dir.display()
+        ),
+    );
+
+    for partition in delta_parts {
+        let name = &partition.partition_name;
+        let src_path = source_dir.join(format!("{name}.img"));
         if !src_path.exists() {
             bail!(
-                "missing source partition image for '{}': {}",
-                partition.partition_name,
+                "missing source partition image for '{name}': {}",
                 src_path.display()
             );
+        }
+
+        if let Some(ref info) = partition.old_partition_info {
+            let file = std::fs::File::open(&src_path).with_context(|| {
+                format!(
+                    "failed to open source partition image '{}'",
+                    src_path.display()
+                )
+            })?;
+            let mmap = unsafe { memmap2::Mmap::map(&file) }.with_context(|| {
+                format!(
+                    "failed to mmap source partition image '{}'",
+                    src_path.display()
+                )
+            })?;
+
+            let expected_size = info.size.unwrap_or(mmap.len() as u64);
+            if (mmap.len() as u64) < expected_size {
+                bail!(
+                    "source partition '{name}.img' size mismatch: expected at least {expected_size} bytes, got {} bytes ({})",
+                    mmap.len(),
+                    src_path.display()
+                );
+            }
+
+            if let Some(ref expected_hash) = info.hash {
+                let actual_hash = Sha256::digest(&mmap[..expected_size as usize]);
+                if actual_hash.as_slice() != expected_hash.as_slice() {
+                    bail!(
+                        "source partition hash mismatch for '{name}.img': expected {}, got {}",
+                        hex::encode(expected_hash),
+                        hex::encode(actual_hash)
+                    );
+                }
+            }
         }
     }
 
     Ok(())
 }
 
-fn partition_has_delta_ops(partition: &crate::proto::PartitionUpdate) -> bool {
+pub fn partition_has_delta_ops(partition: &crate::proto::PartitionUpdate) -> bool {
     partition.operations.iter().any(|op| {
         let op_type = op.r#type();
         matches!(
@@ -637,5 +689,101 @@ mod stream_tests {
             }
             assert_eq!(out, data, "codec {ot:?} roundtrip mismatch");
         }
+    }
+
+    #[test]
+    fn test_validate_source_partitions_missing_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let partition = crate::proto::PartitionUpdate {
+            partition_name: "boot".to_string(),
+            operations: vec![crate::proto::InstallOperation {
+                r#type: crate::proto::install_operation::Type::SourceBsdiff as i32,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let err = validate_source_partitions(&[&partition], temp_dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("missing source partition image for 'boot'")
+        );
+    }
+
+    #[test]
+    fn test_validate_source_partitions_hash_mismatch() {
+        use sha2::{Digest, Sha256};
+        let temp_dir = tempfile::tempdir().unwrap();
+        let img_path = temp_dir.path().join("boot.img");
+        std::fs::write(&img_path, b"actual_content_12345").unwrap();
+
+        let wrong_hash = Sha256::digest(b"expected_different_content").to_vec();
+        let partition = crate::proto::PartitionUpdate {
+            partition_name: "boot".to_string(),
+            operations: vec![crate::proto::InstallOperation {
+                r#type: crate::proto::install_operation::Type::SourceCopy as i32,
+                ..Default::default()
+            }],
+            old_partition_info: Some(crate::proto::PartitionInfo {
+                size: Some(20),
+                hash: Some(wrong_hash),
+            }),
+            ..Default::default()
+        };
+
+        let err = validate_source_partitions(&[&partition], temp_dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("source partition hash mismatch for 'boot.img'")
+        );
+    }
+
+    #[test]
+    fn test_validate_source_partitions_size_mismatch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let img_path = temp_dir.path().join("boot.img");
+        std::fs::write(&img_path, b"short").unwrap();
+
+        let partition = crate::proto::PartitionUpdate {
+            partition_name: "boot".to_string(),
+            operations: vec![crate::proto::InstallOperation {
+                r#type: crate::proto::install_operation::Type::SourceCopy as i32,
+                ..Default::default()
+            }],
+            old_partition_info: Some(crate::proto::PartitionInfo {
+                size: Some(100),
+                hash: None,
+            }),
+            ..Default::default()
+        };
+
+        let err = validate_source_partitions(&[&partition], temp_dir.path()).unwrap_err();
+        assert!(err.to_string().contains("size mismatch"));
+    }
+
+    #[test]
+    fn test_validate_source_partitions_success() {
+        use sha2::{Digest, Sha256};
+        let temp_dir = tempfile::tempdir().unwrap();
+        let img_path = temp_dir.path().join("boot.img");
+        let content = b"valid_boot_image_content_here";
+        std::fs::write(&img_path, content).unwrap();
+
+        let hash = Sha256::digest(content).to_vec();
+        let partition = crate::proto::PartitionUpdate {
+            partition_name: "boot".to_string(),
+            operations: vec![crate::proto::InstallOperation {
+                r#type: crate::proto::install_operation::Type::BrotliBsdiff as i32,
+                ..Default::default()
+            }],
+            old_partition_info: Some(crate::proto::PartitionInfo {
+                size: Some(content.len() as u64),
+                hash: Some(hash),
+            }),
+            ..Default::default()
+        };
+
+        let res = validate_source_partitions(&[&partition], temp_dir.path());
+        assert!(res.is_ok());
     }
 }
