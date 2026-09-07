@@ -22,7 +22,7 @@ pub type ProgressCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 /// Options for opening a payload for extraction. Defaults match the legacy
 /// `open_for_extract` (no progress callback, system temp dir).
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct OpenOptions {
     /// Skip TLS certificate verification for HTTPS URLs.
     pub insecure: bool,
@@ -35,6 +35,20 @@ pub struct OpenOptions {
     /// Set to the output dir to avoid tmpfs and guarantee a writable location
     /// (required on Android).
     pub temp_dir: Option<PathBuf>,
+    /// Resume partial downloads if available (default: true).
+    pub resume: bool,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        Self {
+            insecure: false,
+            user_agent: None,
+            download_progress: None,
+            temp_dir: None,
+            resume: true,
+        }
+    }
 }
 
 /// Open a payload from a file path or URL and return a PayloadView.
