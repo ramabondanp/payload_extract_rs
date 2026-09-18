@@ -247,18 +247,8 @@ impl Driver {
                     br.cache_bits(extra_bits_len);
                     br.drop_bits(extra_bits_len);
                     let mut pw = PuffWriter::new(target);
-                    if let Err(e) = puff_deflate(&mut br, &mut pw) {
-                        eprintln!(
-                            "puff_directly failed: deflate idx={}, offset={}, length={}, p.length={}, extra_bits={}, bytes_to_read={}, br.offset={}, pw.size={}, err={e}",
-                            self.cur_deflate, d.offset, d.length, p.length, extra_bits_len, bytes_to_read, br.offset(), pw.size(),
-                        );
-                        return Err(e);
-                    }
+                    puff_deflate(&mut br, &mut pw)?;
                     if br.offset() != bytes_to_read || pw.size() as u64 != p.length {
-                        eprintln!(
-                            "puff_directly size mismatch: br.offset()={}, bytes_to_read={}, pw.size()={}, p.length={}",
-                            br.offset(), bytes_to_read, pw.size(), p.length
-                        );
                         return Err(Error::Corrupt("puff size mismatch".into()));
                     }
                 } else {
@@ -267,18 +257,8 @@ impl Driver {
                     br.cache_bits(extra_bits_len);
                     br.drop_bits(extra_bits_len);
                     let mut pw = PuffWriter::new(&mut pbuf);
-                    if let Err(e) = puff_deflate(&mut br, &mut pw) {
-                        eprintln!(
-                            "puff indirect failed: deflate idx={}, offset={}, length={}, p.length={}, extra_bits={}, bytes_to_read={}, br.offset={}, pw.size={}, err={e}",
-                            self.cur_deflate, d.offset, d.length, p.length, extra_bits_len, bytes_to_read, br.offset(), pw.size(),
-                        );
-                        return Err(e);
-                    }
+                    puff_deflate(&mut br, &mut pw)?;
                     if br.offset() != bytes_to_read || pw.size() as u64 != p.length {
-                        eprintln!(
-                            "puff indirect size mismatch: br.offset()={}, bytes_to_read={}, pw.size()={}, p.length={}",
-                            br.offset(), bytes_to_read, pw.size(), p.length
-                        );
                         return Err(Error::Corrupt("puff size mismatch".into()));
                     }
                     let bytes_to_copy =
@@ -365,25 +345,11 @@ impl Driver {
                         bw.write_bits((d.offset & 7) as usize, self.last_byte)?;
                         self.last_byte = 0;
                         let mut pr = PuffReader::new(&puff_buffer[..p.length as usize]);
-                        if let Err(e) = huff_deflate(&mut pr, &mut bw) {
-                            eprintln!(
-                                "huff_deflate failed: deflate idx={}, offset={}, length={}, p.length={}, err={e}",
-                                self.cur_deflate, d.offset, d.length, p.length
-                            );
-                            return Err(e);
-                        }
+                        huff_deflate(&mut pr, &mut bw)?;
                         if bw.size() != bytes_to_write {
-                            eprintln!(
-                                "huff deflate size mismatch: bw.size()={}, bytes_to_write={}",
-                                bw.size(), bytes_to_write
-                            );
                             return Err(Error::Corrupt("huff deflate size mismatch".into()));
                         }
                         if pr.bytes_left() != 0 {
-                            eprintln!(
-                                "huff left puff bytes: left={}",
-                                pr.bytes_left()
-                            );
                             return Err(Error::Corrupt("huff left puff bytes".into()));
                         }
                     }
