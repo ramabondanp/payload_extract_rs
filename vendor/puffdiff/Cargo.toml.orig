@@ -1,0 +1,16 @@
+[package]
+name = "puffdiff"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust applier for Android OTA PUFFDIFF (puffin) delta operations"
+license = "BSD-3-Clause"
+authors = ["ril3y"]
+repository = "https://github.com/ril3y/puffdiff-rs"
+keywords = ["puffin", "puffdiff", "deflate", "ota", "android"]
+categories = ["compression"]
+
+[dependencies]
+bsdiff-android = "0.0.2"
+
+[dev-dependencies]
+flate2 = "1.0"

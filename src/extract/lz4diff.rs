@@ -15,8 +15,49 @@ const VERSION_OFFSET: usize = 7; // kLz4diffMagic.size()
 const PB_SIZE_OFFSET: usize = 11; // VERSION_OFFSET + sizeof(version)
 const PB_DATA_OFFSET: usize = 16; // kLz4diffHeaderSize
 
+extern crate lz4_sys;
+
+unsafe extern "C" {
+    fn LZ4_createStreamHC() -> *mut std::ffi::c_void;
+    fn LZ4_freeStreamHC(stateHC: *mut std::ffi::c_void) -> std::ffi::c_int;
+    fn LZ4_compress_destSize(
+        src: *const std::ffi::c_char,
+        dst: *mut std::ffi::c_char,
+        srcSizePtr: *mut std::ffi::c_int,
+        targetDstSize: std::ffi::c_int,
+    ) -> std::ffi::c_int;
+    fn LZ4_compress_HC_destSize(
+        stateHC: *mut std::ffi::c_void,
+        src: *const std::ffi::c_char,
+        dst: *mut std::ffi::c_char,
+        srcSizePtr: *mut std::ffi::c_int,
+        targetDstSize: std::ffi::c_int,
+        compressionLevel: std::ffi::c_int,
+    ) -> std::ffi::c_int;
+    fn LZ4_decompress_safe_partial(
+        src: *const std::ffi::c_char,
+        dst: *mut std::ffi::c_char,
+        compressedSize: std::ffi::c_int,
+        targetOutputSize: std::ffi::c_int,
+        dstCapacity: std::ffi::c_int,
+    ) -> std::ffi::c_int;
+}
+
 fn is_compressed(block: &CompressedBlockInfo) -> bool {
     block.compressed_length < block.uncompressed_length
+}
+
+fn apply_bsdiff(old: &[u8], patch_data: &[u8]) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    if patch_data.starts_with(b"BSDIFF40") || patch_data.starts_with(b"BSDF2") {
+        bsdiff_android::patch_bsdf2(old, patch_data, &mut output)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    } else {
+        let mut patch_reader = std::io::Cursor::new(patch_data);
+        bsdiff_android::patch(old, &mut patch_reader, &mut output)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    Ok(output)
 }
 
 /// Apply an LZ4DIFF patch (BSDIFF or PUFFDIFF inner type) to source data.
@@ -90,34 +131,34 @@ pub fn apply_lz4diff(
     // 3. Apply inner patch
     let decompressed_dst = match op_type {
         super::operation::OpType::Lz4diffBsdiff => {
-            let mut patch_reader = std::io::Cursor::new(inner_patch);
-            let mut output = Vec::new();
-            bsdiff_android::patch(&decompressed_src, &mut patch_reader, &mut output)
-                .context("LZ4DIFF inner bsdiff patch failed")?;
-            output
+            if header.inner_type == 1 {
+                puffdiff::puffpatch(&decompressed_src, inner_patch)
+                    .context("LZ4DIFF inner puffdiff patch failed")?
+            } else {
+                apply_bsdiff(&decompressed_src, inner_patch)
+                    .context("LZ4DIFF inner bsdiff patch failed")?
+            }
         }
         super::operation::OpType::Lz4diffPuffdiff => {
-            bail!(
-                "LZ4DIFF_PUFFDIFF operations are not yet supported — \
-                 the inner puffdiff patch uses the PUF1 format (puffin library), \
-                 which is not compatible with bsdiff"
-            );
+            puffdiff::puffpatch(&decompressed_src, inner_patch)
+                .context("LZ4DIFF inner puffdiff patch failed")?
         }
         _ => bail!("unexpected op_type in apply_lz4diff: {:?}", op_type),
     };
 
     // 4. Recompress and apply postfix patches
-    let algo_type = dst_info
+    let (algo_type, algo_level) = dst_info
         .algo
         .as_ref()
-        .map(|a| a.r#type())
-        .unwrap_or(compression_algorithm::Type::Lz4);
+        .map(|a| (a.r#type(), a.level))
+        .unwrap_or((compression_algorithm::Type::Lz4, 0));
 
     compress_blob(
         &decompressed_dst,
         &dst_info.block_info,
         dst_info.zero_padding_enabled,
         algo_type,
+        algo_level,
     )
     .context("LZ4DIFF destination recompression failed")
 }
@@ -152,32 +193,44 @@ fn decompress_blob(
         let block_data = &data[compressed_offset..block_end];
 
         if !is_compressed(block) {
-            output.extend_from_slice(block_data);
+            let to_copy = (block.uncompressed_length as usize).min(block_data.len());
+            output.extend_from_slice(&block_data[..to_copy]);
         } else {
-            let input = if zero_padding_enabled {
-                // Skip leading zero padding bytes
-                let padding = block_data.iter().take_while(|&&b| b == 0).count();
-                &block_data[padding..]
-            } else {
-                block_data
+            let mut inputmargin = 0usize;
+            if zero_padding_enabled {
+                let scan_len = (4096).min(block_data.len());
+                while inputmargin < scan_len && block_data[inputmargin] == 0 {
+                    inputmargin += 1;
+                }
+            }
+            let input = &block_data[inputmargin..];
+            let out_start = output.len();
+            let uncompressed_len = block.uncompressed_length as usize;
+            output.resize(out_start + uncompressed_len, 0);
+
+            let ret = unsafe {
+                LZ4_decompress_safe_partial(
+                    input.as_ptr() as *const std::ffi::c_char,
+                    output[out_start..].as_mut_ptr() as *mut std::ffi::c_char,
+                    input.len() as std::ffi::c_int,
+                    uncompressed_len as std::ffi::c_int,
+                    uncompressed_len as std::ffi::c_int,
+                )
             };
 
-            let decompressed =
-                lz4_flex::block::decompress(input, block.uncompressed_length as usize)
-                    .map_err(|e| anyhow::anyhow!("LZ4 block decompression failed: {e}"))?;
-
-            if decompressed.len() != block.uncompressed_length as usize {
+            if ret < 0 || (ret as usize) != uncompressed_len {
                 bail!(
-                    "LZ4 decompression size mismatch: expected {}, got {}",
-                    block.uncompressed_length,
-                    decompressed.len()
+                    "LZ4 decompression failed: ret={ret}, expected {uncompressed_len} bytes"
                 );
             }
-
-            output.extend_from_slice(&decompressed);
         }
 
         compressed_offset = block_end;
+    }
+
+    // Trailing data not recorded by compressed block info is treated as uncompressed
+    if compressed_offset < data.len() {
+        output.extend_from_slice(&data[compressed_offset..]);
     }
 
     Ok(output)
@@ -189,13 +242,26 @@ fn compress_blob(
     blocks: &[CompressedBlockInfo],
     zero_padding_enabled: bool,
     algo_type: compression_algorithm::Type,
+    algo_level: i32,
 ) -> Result<Vec<u8>> {
     if blocks.is_empty() {
         return Ok(data.to_vec());
     }
 
+    let uncompressed_size: usize = blocks.iter().map(|b| b.uncompressed_length as usize).sum();
     let total_compressed: u64 = blocks.iter().map(|b| b.compressed_length).sum();
     let mut output = bufpool::try_alloc_capacity(total_compressed as usize)?;
+
+    let hc = unsafe { LZ4_createStreamHC() };
+    struct HcGuard(*mut std::ffi::c_void);
+    impl Drop for HcGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { LZ4_freeStreamHC(self.0) };
+            }
+        }
+    }
+    let _hc_guard = HcGuard(hc);
 
     for block in blocks {
         let block_start = block.uncompressed_offset as usize;
@@ -210,48 +276,64 @@ fn compress_blob(
 
         if !is_compressed(block) {
             output.extend_from_slice(uncompressed_block);
+            let clen = block.compressed_length as usize;
+            if clen > uncompressed_block.len() {
+                output.resize(output.len() + (clen - uncompressed_block.len()), 0);
+            }
             continue;
         }
 
         let target_size = block.compressed_length as usize;
+        let mut block_buf = bufpool::try_alloc_zeroed(target_size)?;
 
-        // Compress block using LZ4
-        let compressed = match algo_type {
-            compression_algorithm::Type::Uncompressed => uncompressed_block.to_vec(),
-            compression_algorithm::Type::Lz4 | compression_algorithm::Type::Lz4hc => {
-                lz4_flex::block::compress(uncompressed_block)
+        // Remaining uncompressed bytes from this block's start up to uncompressed_size,
+        // mirroring AOSP update_engine's TryCompressBlob.
+        let mut src_size = (uncompressed_size.saturating_sub(block_start)) as std::ffi::c_int;
+
+        let ret = match algo_type {
+            compression_algorithm::Type::Uncompressed => {
+                let to_copy = uncompressed_block.len().min(target_size);
+                block_buf[..to_copy].copy_from_slice(&uncompressed_block[..to_copy]);
+                to_copy as std::ffi::c_int
             }
+            compression_algorithm::Type::Lz4hc => unsafe {
+                LZ4_compress_HC_destSize(
+                    hc,
+                    uncompressed_block.as_ptr() as *const std::ffi::c_char,
+                    block_buf.as_mut_ptr() as *mut std::ffi::c_char,
+                    &mut src_size,
+                    target_size as std::ffi::c_int,
+                    algo_level as std::ffi::c_int,
+                )
+            },
+            compression_algorithm::Type::Lz4 => unsafe {
+                LZ4_compress_destSize(
+                    uncompressed_block.as_ptr() as *const std::ffi::c_char,
+                    block_buf.as_mut_ptr() as *mut std::ffi::c_char,
+                    &mut src_size,
+                    target_size as std::ffi::c_int,
+                )
+            },
         };
 
-        if compressed.len() > target_size && block.postfix_bspatch.is_empty() {
-            // Compressed output exceeds target and no postfix to fix it.
-            // This can happen when lz4_flex produces less efficient compression
-            // than Android's LZ4. Fall back to storing uncompressed data truncated
-            // to target_size — this should not happen in practice with well-formed
-            // OTA payloads.
+        if ret <= 0 {
             bail!(
-                "LZ4 recompression produced {} bytes, exceeding target {} bytes \
-                 (LZ4 implementation mismatch, no postfix patch available)",
-                compressed.len(),
-                target_size
+                "LZ4 compression failed (code {ret}) for block at offset {block_start} (target {target_size} bytes)"
             );
         }
 
-        // Build output block with correct target size (fallible allocation).
-        let mut block_buf = bufpool::try_alloc_zeroed(target_size)?;
-        let bytes_written = compressed.len().min(target_size);
+        let bytes_written = (ret as usize).min(target_size);
 
         if bytes_written < target_size {
             if zero_padding_enabled {
                 // Compressed data at END, zero padding at START
                 let padding = target_size - bytes_written;
-                block_buf[padding..].copy_from_slice(&compressed[..bytes_written]);
+                block_buf.copy_within(0..bytes_written, padding);
+                block_buf[..padding].fill(0);
             } else {
                 // Compressed data at START, zero padding at END
-                block_buf[..bytes_written].copy_from_slice(&compressed[..bytes_written]);
+                block_buf[bytes_written..].fill(0);
             }
-        } else {
-            block_buf.copy_from_slice(&compressed[..target_size]);
         }
 
         // Apply postfix bsdiff patch if present (fixes LZ4 implementation differences)
@@ -274,9 +356,7 @@ fn compress_blob(
                 }
             }
 
-            let mut patch_reader = std::io::Cursor::new(&block.postfix_bspatch[..]);
-            let mut fixed = Vec::new();
-            bsdiff_android::patch(&block_buf, &mut patch_reader, &mut fixed)
+            let fixed = apply_bsdiff(&block_buf, &block.postfix_bspatch)
                 .context("LZ4DIFF postfix bspatch failed")?;
             block_buf = fixed;
         }

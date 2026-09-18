@@ -82,6 +82,8 @@ futures = { version = "0.3", default-features = false, features = [
   "std",
 ], optional = true }
 tempfile = { version = "3", optional = true }
+puffdiff = { path = "vendor/puffdiff" }
+lz4-sys = "1.11.1"
 
 [build-dependencies]
 prost-build = "0.14"

@@ -94,7 +94,7 @@ pub fn extract_partitions(
         );
     }
 
-    if has_delta_ops {
+    if has_delta_ops && !payload.is_source_validated() {
         let source_dir = config
             .source_dir
             .as_deref()
@@ -419,11 +419,31 @@ fn process_operation(
             )?;
         }
         OpType::Puffdiff => {
-            bail!(
-                "PUFFDIFF operations are not yet supported — \
-                 puffdiff uses the PUF1 patch format (puffin library), \
-                 which is not compatible with bsdiff"
-            );
+            let src = source_data.ok_or_else(|| {
+                anyhow::anyhow!("{:?} requires source partition data", task.op_type)
+            })?;
+            let blob = get_blob(payload, task)?;
+            if config.verify_ops {
+                verify::verify_sha256(
+                    blob,
+                    &task.data_sha256,
+                    &format!("data hash mismatch for {}.img", task.partition_name),
+                )?;
+            }
+            bufpool::with_extent_buffer(
+                extents_byte_size(&task.src_extents, block_size) as usize,
+                |buf| {
+                    read_from_extents(src, &task.src_extents, block_size, buf);
+                    verify::verify_sha256(
+                        buf,
+                        &task.src_sha256,
+                        &format!("source hash mismatch for {}.img", task.partition_name),
+                    )?;
+                    let patched = puffdiff::puffpatch(buf, blob)
+                        .map_err(|e| anyhow::anyhow!("PUFFDIFF patch failed: {e}"))?;
+                    write_to_extents(&patched, &task.dst_extents, writer, block_size)
+                },
+            )?;
         }
         OpType::Zucchini => {
             bail!(

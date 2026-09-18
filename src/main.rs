@@ -9,6 +9,8 @@ mod payload;
 mod proto;
 mod style;
 
+extern crate lz4_sys;
+
 use commands::{Cli, Commands};
 
 fn main() {
@@ -26,7 +28,7 @@ fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("{} {e}", style::error().apply_to("Error:"));
+        eprintln!("{} {e:#}", style::error().apply_to("Error:"));
         std::process::exit(1);
     }
 }

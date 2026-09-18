@@ -366,6 +366,7 @@ pub fn open_http_extract(
         }
 
         // Validate source partitions for delta OTA BEFORE downloading any data!
+        let mut source_validated = false;
         let has_delta_ops = parts
             .iter()
             .any(|p| crate::extract::partition_has_delta_ops(p));
@@ -377,6 +378,7 @@ pub fn open_http_extract(
                 );
             };
             crate::extract::validate_source_partitions(&parts, src_dir)?;
+            source_validated = true;
         }
 
         let mut op_ranges: Vec<(u64, u64)> = Vec::new();
@@ -391,7 +393,9 @@ pub fn open_http_extract(
         }
 
         if op_ranges.is_empty() {
-            return Ok(PayloadView::from_memory(meta, HashMap::new())?);
+            let mut view = PayloadView::from_memory(meta, HashMap::new())?;
+            view.set_source_validated(source_validated);
+            return Ok(view);
         }
 
         op_ranges.sort_by_key(|r| r.0);
@@ -625,6 +629,7 @@ pub fn open_http_extract(
 
         let mut view = PayloadView::from_mmap_compact(mmap, remap, Box::new(guard))?;
         view.set_success_flag(success_flag);
+        view.set_source_validated(source_validated);
         Ok(view)
     })
 }
