@@ -14,7 +14,7 @@ Android OTA `payload.bin` extractor written in Rust.
 - **Parallel processing** — rayon work-stealing thread pool for concurrent decompression
 - **Streaming decompression** — operation output is written incrementally, keeping heap memory bounded regardless of partition size
 - **HTTP range requests & resumable downloads** — extract specific partitions from remote OTA packages without downloading the entire file; automatically retries and resumes downloads on network errors
-- **Rich operation types** — REPLACE, REPLACE_BZ, REPLACE_XZ, REPLACE_ZSTD, BROTLI_BSDIFF, LZ4DIFF_BSDIFF, ZERO, DISCARD, SOURCE_COPY, SOURCE_BSDIFF
+- **Rich operation types** — REPLACE, REPLACE_BZ, REPLACE_XZ, REPLACE_ZSTD, BROTLI_BSDIFF, LZ4DIFF_BSDIFF, PUFFDIFF, ZERO, DISCARD, SOURCE_COPY, SOURCE_BSDIFF
 - **Multiple input sources** — local `.bin` files, OTA ZIP archives, HTTP/HTTPS URLs
 - **Already-open outputs** — the library can extract a partition directly into a caller-owned writable, seekable file without reopening a path
 - **Fast ZIP metadata lookup** — validated zero-offset lookup, including ZIP64, avoids whole-OTA scans; automatic offset detection remains a compatibility fallback
@@ -134,7 +134,7 @@ payload-extract -A "CustomAgent/1.0" list "https://..."
 - **并行处理** — rayon work-stealing 线程池，并发解压缩
 - **流式解压** — 操作输出增量写盘，堆内存占用不随分区大小增长
 - **HTTP 分段下载与断点续传** — 从远程 OTA 包中提取指定分区，无需下载完整文件；网络出错自动重试续传，支持跨运行断点续传
-- **丰富的操作类型** — REPLACE、REPLACE_BZ、REPLACE_XZ、REPLACE_ZSTD、BROTLI_BSDIFF、LZ4DIFF_BSDIFF、ZERO、DISCARD、SOURCE_COPY、SOURCE_BSDIFF
+- **丰富的操作类型** — REPLACE、REPLACE_BZ、REPLACE_XZ、REPLACE_ZSTD、BROTLI_BSDIFF、LZ4DIFF_BSDIFF、PUFFDIFF、ZERO、DISCARD、SOURCE_COPY、SOURCE_BSDIFF
 - **多输入源** — 本地 `.bin` 文件、OTA ZIP 压缩包、HTTP/HTTPS URL
 - **已打开文件输出** — 库接口支持直接向调用方持有的可写、可定位文件提取分区，无需重新打开路径
 - **快速 ZIP 元数据定位** — 验证零偏移目录位置（含 ZIP64），避免扫描整份 OTA；失败时保留自动偏移探测兼容路径

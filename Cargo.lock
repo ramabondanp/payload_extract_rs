@@ -1140,6 +1140,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "puffdiff",
  "rayon",
  "reqwest",
  "rustls",
@@ -1332,6 +1333,13 @@ name = "protoc-bin-vendored-win32"
 version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "263a3f48f01e7309e857138bd47f785585b4a005e8e56c6d2824ce91195999c3"
+
+[[package]]
+name = "puffdiff"
+version = "0.1.0"
+dependencies = [
+ "bsdiff-android",
+]
 
 [[package]]
 name = "quote"
