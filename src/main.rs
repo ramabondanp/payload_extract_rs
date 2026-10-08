@@ -3,6 +3,8 @@ use clap::Parser;
 mod commands;
 use payload_extract::{extract, input, ota_metadata, payload, proto, storage, style};
 
+extern crate lz4_sys;
+
 use commands::{Cli, Commands};
 
 fn main() {
@@ -20,7 +22,7 @@ fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("{} {e}", style::error().apply_to("Error:"));
+        eprintln!("{} {e:#}", style::error().apply_to("Error:"));
         std::process::exit(1);
     }
 }

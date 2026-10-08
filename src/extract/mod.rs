@@ -446,9 +446,9 @@ fn process_operation(
                 )?;
             }
             bufpool::with_extent_buffer(
-                extents_byte_size(&task.src_extents, block_size) as usize,
+                0,
                 |buf| {
-                    read_from_extents(src, &task.src_extents, block_size, buf);
+                    read_from_extents(src, &task.src_extents, block_size, buf)?;
                     verify::verify_sha256(
                         buf,
                         &task.src_sha256,

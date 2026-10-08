@@ -18,7 +18,7 @@ Android OTA `payload.bin` extractor written in Rust.
 - **Multiple input sources** — local `.bin` files, OTA ZIP archives, HTTP/HTTPS URLs
 - **Already-open outputs** — the library can extract a partition directly into a caller-owned writable, seekable file without reopening a path
 - **Fast ZIP metadata lookup** — validated zero-offset lookup, including ZIP64, avoids whole-OTA scans; automatic offset detection remains a compatibility fallback
-- **Delta OTA support** — incremental updates with `--source-dir`
+- **Delta OTA support** — incremental updates with `--source-dir` (supporting Android 17 updates with automated dm-verity hash tree and FEC regeneration)
 - **Integrity verification** — per-operation SHA256, partition hash, dm-verity hash tree, FEC
 
 ### Installation
@@ -138,7 +138,7 @@ payload-extract -A "CustomAgent/1.0" list "https://..."
 - **多输入源** — 本地 `.bin` 文件、OTA ZIP 压缩包、HTTP/HTTPS URL
 - **已打开文件输出** — 库接口支持直接向调用方持有的可写、可定位文件提取分区，无需重新打开路径
 - **快速 ZIP 元数据定位** — 验证零偏移目录位置（含 ZIP64），避免扫描整份 OTA；失败时保留自动偏移探测兼容路径
-- **增量 OTA 支持** — 通过 `--source-dir` 指定旧分区目录
+- **增量 OTA 支持** — 通过 `--source-dir` 指定旧分区目录（兼容 Android 17 增量更新，自动重建 dm-verity 哈希树与 FEC 前向纠错）
 - **完整性验证** — 操作级 SHA256、分区哈希、dm-verity 哈希树、FEC 前向纠错
 
 ### 安装

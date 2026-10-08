@@ -6,3 +6,5 @@ pub mod payload;
 pub mod proto;
 pub mod style;
 pub mod storage;
+
+extern crate lz4_sys;
