@@ -1288,6 +1288,12 @@ mod tests {
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
 
+    fn test_client() -> reqwest::Client {
+        #[cfg(feature = "http-rustls")]
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
     fn serve_once(response: &'static [u8]) -> (String, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -1303,7 +1309,7 @@ mod tests {
     #[test]
     fn partial_reads_reject_bad_ranges_and_lengths() {
         let runtime = build_runtime().unwrap();
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = test_client();
         runtime.block_on(async {
             for (response, expected) in [
                 (b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 1-4/10\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbcde".as_slice(), true),
@@ -1325,7 +1331,7 @@ mod tests {
     #[test]
     fn partial_target_write_never_crosses_requested_range() {
         let runtime = build_runtime().unwrap();
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = test_client();
         runtime.block_on(async {
             for (response, expected) in [
                 (b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 1-4/10\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbcde".as_slice(), true),
@@ -1349,7 +1355,7 @@ mod tests {
     #[test]
     fn zip_size_probe_rejects_wrong_content_range() {
         let runtime = build_runtime().unwrap();
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = test_client();
         let (url, server) = serve_once(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 1-4/10\r\nContent-Length: 4\r\nConnection: close\r\n\r\nPKxx");
         assert!(
             runtime

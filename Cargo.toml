@@ -64,6 +64,7 @@ tempfile = { version = "3", optional = true }
 webpki-root-certs = { version = "1", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 puffdiff = { path = "vendor/puffdiff" }
+lz4-sys = "1.11.1"
 
 [build-dependencies]
 prost-build = "0.14"

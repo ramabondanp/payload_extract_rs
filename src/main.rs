@@ -3,6 +3,8 @@ use clap::Parser;
 mod commands;
 use payload_extract::{extract, input, ota_metadata, proto, storage, style};
 
+extern crate lz4_sys;
+
 use commands::{Cli, Commands};
 
 fn main() {
